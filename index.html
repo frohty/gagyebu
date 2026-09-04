@@ -150,6 +150,7 @@ function loadState(){
 function saveState(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 
 let state = loadState();
+const APP_START_MONTH = '2026-09';
 let viewMonth = getMonthKey(new Date());
 let currentTab = 'home';
 
@@ -180,8 +181,18 @@ function getVisibleTransfers(monthKey){
 function shiftMonth(delta){
   const [y,m] = viewMonth.split('-').map(Number);
   const d = new Date(y, m - 1 + delta, 1);
-  viewMonth = getMonthKey(d);
+  const newKey = getMonthKey(d);
+  if(newKey < APP_START_MONTH) return;
+  viewMonth = newKey;
   render();
+}
+function renderMonthNav(){
+  const atStart = viewMonth <= APP_START_MONTH;
+  return `<div class="monthnav">
+    <button onclick="shiftMonth(-1)" ${atStart ? 'disabled style="opacity:0.35"' : ''}>‹</button>
+    <span>${monthLabel(viewMonth)}</span>
+    <button onclick="shiftMonth(1)">›</button>
+  </div>`;
 }
 
 function switchTab(tab){
@@ -276,7 +287,7 @@ function renderTransfer(){
   const done = visible.filter(t => checks[t.id]).reduce((s,t) => s + getEffectiveBudget(t, viewMonth), 0);
   const pct = total ? Math.round(done / total * 100) : 0;
 
-  let html = `<div class="monthnav"><button onclick="shiftMonth(-1)">‹</button><span>${monthLabel(viewMonth)}</span><button onclick="shiftMonth(1)">›</button></div>`;
+  let html = renderMonthNav();
   html += `<div class="banner">
     <div style="display:flex;justify-content:space-between">
       <span>${formatWon(done)} / ${formatWon(total)} 완료</span><span>${pct}%</span>
@@ -361,7 +372,7 @@ function deleteTransfer(id){
 function renderCards(){
   const el = document.getElementById('screen-cards');
   const cm = state.cardMonthly[viewMonth] || {};
-  let html = `<div class="monthnav"><button onclick="shiftMonth(-1)">‹</button><span>${monthLabel(viewMonth)}</span><button onclick="shiftMonth(1)">›</button></div>`;
+  let html = renderMonthNav();
   html += `<div class="card">`;
   let nextCard = null;
 
