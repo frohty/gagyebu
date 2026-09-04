@@ -102,13 +102,15 @@ function uid(){ return Date.now().toString(36) + Math.random().toString(36).slic
 function defaultData(){
   return {
     transfers: [
-      { id: uid(), bank:'우리',   memo:'청약 + 적금',              amount:400000 },
-      { id: uid(), bank:'신한',   memo:'청약',                     amount:250000 },
-      { id: uid(), bank:'카카오', memo:'계좌 + 적금 + 엄마용돈',   amount:300000 },
-      { id: uid(), bank:'외환',   memo:'보험 + 저축보험',          amount:430000 },
-      { id: uid(), bank:'토스',   memo:'새마을적금 + 연금저축',    amount:400000 }
+      { id: uid(), bank:'우리',   memo:'청약 + 적금',              budget:400000 },
+      { id: uid(), bank:'신한',   memo:'청약',                     budget:250000 },
+      { id: uid(), bank:'카카오', memo:'계좌 + 적금 + 엄마용돈',   budget:300000 },
+      { id: uid(), bank:'외환',   memo:'보험 + 저축보험',          budget:430000 },
+      { id: uid(), bank:'토스',   memo:'새마을적금 + 연금저축',    budget:400000 }
     ],
     transferChecks: {},
+    transferActuals: {},
+    transferBudgets: {},
     cards: [
       { id: uid(), name:'롯데카드',          fixed:750000,  target:750000 },
       { id: uid(), name:'iD STATION GS',     fixed:520000,  target:800000 },
@@ -128,10 +130,18 @@ function defaultData(){
   };
 }
 
+function migrateState(s){
+  if(!s.transferActuals) s.transferActuals = {};
+  if(!s.transferBudgets) s.transferBudgets = {};
+  (s.transfers || []).forEach(t => {
+    if(t.budget === undefined) t.budget = (t.amount !== undefined ? t.amount : 0);
+  });
+  return s;
+}
 function loadState(){
   try{
     const raw = localStorage.getItem(STORAGE_KEY);
-    if(raw) return JSON.parse(raw);
+    if(raw) return migrateState(JSON.parse(raw));
   }catch(e){}
   const d = defaultData();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(d));
@@ -152,6 +162,20 @@ function addMonthsToDate(dateStr, months){
   return d;
 }
 function daysBetween(a,b){ return Math.round((b - a) / 86400000); }
+
+function getEffectiveBudget(item, monthKey){
+  const overrides = Object.keys(state.transferBudgets)
+    .filter(k => k <= monthKey && state.transferBudgets[k][item.id] !== undefined)
+    .sort();
+  if(overrides.length) return state.transferBudgets[overrides[overrides.length - 1]][item.id];
+  return item.budget;
+}
+function getVisibleTransfers(monthKey){
+  return state.transfers.filter(t =>
+    (!t.createdMonth || t.createdMonth <= monthKey) &&
+    (!t.endedMonth || monthKey < t.endedMonth)
+  );
+}
 
 function shiftMonth(delta){
   const [y,m] = viewMonth.split('-').map(Number);
@@ -186,7 +210,7 @@ function renderHome(){
   const el = document.getElementById('screen-home');
   const monthKey = getMonthKey(new Date());
   const checks = state.transferChecks[monthKey] || {};
-  const todoTransfers = state.transfers.filter(t => !checks[t.id]);
+  const todoTransfers = getVisibleTransfers(monthKey).filter(t => !checks[t.id]);
 
   const cm = state.cardMonthly[monthKey] || {};
   const todoCards = state.cards.filter(c => c.target && ((cm[c.id] ?? c.fixed) < c.target));
@@ -211,7 +235,7 @@ function renderHome(){
       html += `<div class="card">`;
       todoTransfers.forEach(t => {
         html += `<div class="row" onclick="switchTab('transfer')" style="cursor:pointer">
-          <div class="info"><p class="title">${t.bank} 이체 아직 안 함</p><p class="desc">${t.memo} · ${formatWon(t.amount)}</p></div>
+          <div class="info"><p class="title">${t.bank} 이체 아직 안 함</p><p class="desc">${t.memo} · 예산 ${formatWon(getEffectiveBudget(t, monthKey))}</p></div>
         </div>`;
       });
       html += `</div>`;
@@ -246,8 +270,10 @@ function renderHome(){
 function renderTransfer(){
   const el = document.getElementById('screen-transfer');
   const checks = state.transferChecks[viewMonth] || {};
-  const total = state.transfers.reduce((s,t) => s + t.amount, 0);
-  const done = state.transfers.filter(t => checks[t.id]).reduce((s,t) => s + t.amount, 0);
+  const actuals = state.transferActuals[viewMonth] || {};
+  const visible = getVisibleTransfers(viewMonth);
+  const total = visible.reduce((s,t) => s + getEffectiveBudget(t, viewMonth), 0);
+  const done = visible.filter(t => checks[t.id]).reduce((s,t) => s + getEffectiveBudget(t, viewMonth), 0);
   const pct = total ? Math.round(done / total * 100) : 0;
 
   let html = `<div class="monthnav"><button onclick="shiftMonth(-1)">‹</button><span>${monthLabel(viewMonth)}</span><button onclick="shiftMonth(1)">›</button></div>`;
@@ -258,12 +284,18 @@ function renderTransfer(){
     <div class="progress ${pct >= 100 ? 'done' : ''}"><div style="width:${pct}%"></div></div>
   </div>`;
   html += `<div class="card">`;
-  state.transfers.forEach(t => {
+  visible.forEach(t => {
     const on = !!checks[t.id];
+    const actual = actuals[t.id];
+    const budget = getEffectiveBudget(t, viewMonth);
     html += `<div class="row">
       <div class="check ${on ? 'done' : ''}" onclick="toggleTransfer('${t.id}')">✓</div>
-      <div class="info"><p class="title">${t.bank}</p><p class="desc">${t.memo}</p></div>
-      <span class="amt">${formatWon(t.amount)}</span>
+      <div class="info">
+        <p class="title">${t.bank}</p>
+        <p class="desc">${t.memo}</p>
+        ${actual != null ? `<p class="desc" style="color:var(--accent)">실이체 ${formatWon(actual)}</p>` : ''}
+      </div>
+      <span class="amt">예산 ${formatWon(budget)}</span>
       <button class="iconbtn" onclick="openTransferModal('${t.id}')">✎</button>
     </div>`;
   });
@@ -277,11 +309,14 @@ function toggleTransfer(id){
 }
 function openTransferModal(id){
   const item = id ? state.transfers.find(t => t.id === id) : null;
+  const actualVal = item ? ((state.transferActuals[viewMonth] || {})[item.id]) : undefined;
+  const budgetVal = item ? getEffectiveBudget(item, viewMonth) : '';
   const modal = document.getElementById('modalContent');
   modal.innerHTML = `
     <div class="field"><label>은행</label><input id="f-bank" value="${item ? item.bank : ''}"></div>
     <div class="field"><label>내용</label><input id="f-memo" value="${item ? item.memo : ''}"></div>
-    <div class="field"><label>금액</label><input id="f-amount" type="number" value="${item ? item.amount : ''}"></div>
+    <div class="field"><label>예산금액 (${monthLabel(viewMonth)}부터 적용)</label><input id="f-budget" type="number" value="${budgetVal}"></div>
+    <div class="field"><label>실이체금액 (${monthLabel(viewMonth)})</label><input id="f-actual" type="number" value="${actualVal != null ? actualVal : ''}"></div>
     <div class="modal-actions">
       ${item ? `<button class="btn btn-danger" onclick="deleteTransfer('${id}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
@@ -292,19 +327,33 @@ function openTransferModal(id){
 function saveTransfer(id){
   const bank = document.getElementById('f-bank').value.trim();
   const memo = document.getElementById('f-memo').value.trim();
-  const amount = parseInt(document.getElementById('f-amount').value, 10) || 0;
+  const budget = parseInt(document.getElementById('f-budget').value, 10) || 0;
+  const actualRaw = document.getElementById('f-actual').value;
+  const actual = actualRaw !== '' ? (parseInt(actualRaw, 10) || 0) : null;
   if(!bank){ alert('은행을 입력해줘'); return; }
+  let itemId = id;
   if(id){
     const item = state.transfers.find(t => t.id === id);
-    item.bank = bank; item.memo = memo; item.amount = amount;
+    item.bank = bank; item.memo = memo;
+    if(!state.transferBudgets[viewMonth]) state.transferBudgets[viewMonth] = {};
+    state.transferBudgets[viewMonth][id] = budget;
   } else {
-    state.transfers.push({ id: uid(), bank, memo, amount });
+    itemId = uid();
+    state.transfers.push({ id: itemId, bank, memo, budget, createdMonth: viewMonth });
   }
+  if(!state.transferActuals[viewMonth]) state.transferActuals[viewMonth] = {};
+  if(actual != null) state.transferActuals[viewMonth][itemId] = actual;
+  else delete state.transferActuals[viewMonth][itemId];
   saveState(); closeModal(); render();
 }
 function deleteTransfer(id){
-  if(!confirm('삭제할까요?')) return;
-  state.transfers = state.transfers.filter(t => t.id !== id);
+  if(!confirm('삭제할까요? 이번 달부터 목록에서 빠지고, 이전 달 기록은 그대로 남아요.')) return;
+  const item = state.transfers.find(t => t.id === id);
+  if(item.createdMonth === viewMonth){
+    state.transfers = state.transfers.filter(t => t.id !== id);
+  } else {
+    item.endedMonth = viewMonth;
+  }
   saveState(); closeModal(); render();
 }
 
