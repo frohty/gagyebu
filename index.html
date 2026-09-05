@@ -116,13 +116,20 @@ function defaultData(){
     transferBudgetEntries: {},
     transferActualEntries: {},
     cards: [
-      { id: uid(), name:'롯데카드',          fixed:750000,  target:750000 },
-      { id: uid(), name:'iD STATION GS',     fixed:520000,  target:800000 },
-      { id: uid(), name:'토스삼성카드',      fixed:294419,  target:600000 },
-      { id: uid(), name:'THE iD. PLATINUM',  fixed:20199,   target:500000 },
-      { id: uid(), name:'우리 EVERY 1',      fixed:0,       target:null }
+      { id: uid(), name:'롯데카드', fixedItems:[{id:uid(),label:'뮤엠영어',amount:600000,date:null},{id:uid(),label:'상승도장',amount:150000,date:null}], tiers:[{id:uid(),amount:750000,benefit:''}] },
+      { id: uid(), name:'iD STATION GS', fixedItems:[{id:uid(),label:'수학학원',amount:400000,date:null},{id:uid(),label:'통신비',amount:120000,date:null}], tiers:[{id:uid(),amount:800000,benefit:'GS칼텍스 주유 할인 15,000→25,000원'}] },
+      { id: uid(), name:'토스삼성카드', fixedItems:[
+          {id:uid(),label:'위버스마인드',amount:79900,date:null},{id:uid(),label:'대명스테이션',amount:59400,date:null},
+          {id:uid(),label:'신한라이프',amount:40192,date:null},{id:uid(),label:'카카오페이손해보험',amount:20124,date:null},
+          {id:uid(),label:'메리츠화재',amount:63230,date:null},{id:uid(),label:'KB손해보험',amount:31573,date:null}
+        ], tiers:[{id:uid(),amount:600000,benefit:'토스페이·토스쇼핑·온라인 통합 할인한도 1만→2만원, 인앱·디지털콘텐츠 통합 할인한도 5천→7천원'}] },
+      { id: uid(), name:'THE iD. PLATINUM', fixedItems:[{id:uid(),label:'티빙',amount:13500,date:null},{id:uid(),label:'카카오 정기결제',amount:6699,date:null}], tiers:[{id:uid(),amount:500000,benefit:'티빙·카카오 정기결제 50% 할인, 스타벅스 할인·라운지 이용'}] },
+      { id: uid(), name:'우리 EVERY 1', fixedItems:[], tiers:[] }
     ],
     cardMonthly: {},
+    cardEntries: {},
+    cardFixedAmounts: {},
+    cardTierAmounts: {},
     deposits: [],
     debts: [],
     incomeLog: [],
@@ -144,6 +151,35 @@ function migrateState(s){
   if(!s.transferBudgets) s.transferBudgets = {};
   if(!s.transferBudgetEntries) s.transferBudgetEntries = {};
   if(!s.transferActualEntries) s.transferActualEntries = {};
+  if(!s.cardEntries) s.cardEntries = {};
+  if(!s.cardFixedAmounts) s.cardFixedAmounts = {};
+  if(!s.cardTierAmounts) s.cardTierAmounts = {};
+  const knownFixedBreakdowns = {
+    '롯데카드': [['뮤엠영어',600000],['상승도장',150000]],
+    'iD STATION GS': [['수학학원',400000],['통신비',120000]],
+    '토스삼성카드': [['위버스마인드',79900],['대명스테이션',59400],['신한라이프',40192],['카카오페이손해보험',20124],['메리츠화재',63230],['KB손해보험',31573]],
+    'THE iD. PLATINUM': [['티빙',13500],['카카오 정기결제',6699]],
+    '우리 EVERY 1': []
+  };
+  const knownTierBenefits = {
+    'iD STATION GS': 'GS칼텍스 주유 할인 15,000→25,000원',
+    '토스삼성카드': '토스페이·토스쇼핑·온라인 통합 할인한도 1만→2만원, 인앱·디지털콘텐츠 통합 할인한도 5천→7천원',
+    'THE iD. PLATINUM': '티빙·카카오 정기결제 50% 할인, 스타벅스 할인·라운지 이용'
+  };
+  (s.cards || []).forEach(c => {
+    if(!c.fixedItems){
+      if(knownFixedBreakdowns[c.name]){
+        c.fixedItems = knownFixedBreakdowns[c.name].map(([label,amount]) => ({ id: uid(), label, amount, date: null }));
+      } else {
+        c.fixedItems = c.fixed ? [{ id: uid(), label: '고정', amount: c.fixed, date: null }] : [];
+      }
+    } else {
+      c.fixedItems.forEach(f => { if(f.date === undefined) f.date = null; });
+    }
+    if(!c.tiers){
+      c.tiers = (c.target != null) ? [{ id: uid(), amount: c.target, benefit: knownTierBenefits[c.name] || '' }] : [];
+    }
+  });
   if(!s.debts) s.debts = [];
   if(!s.incomeLog) s.incomeLog = [];
   if(!s.incomeSources) s.incomeSources = [];
@@ -269,6 +305,40 @@ function getActualAmount(item, monthKey){
   if(entries && entries.length) return entries.reduce((s,e) => s + e.amount, 0);
   return (state.transferActuals[monthKey] || {})[item.id];
 }
+function getFixedItemAmount(item, monthKey){
+  const overrides = Object.keys(state.cardFixedAmounts)
+    .filter(k => k <= monthKey && state.cardFixedAmounts[k][item.id] !== undefined)
+    .sort();
+  if(overrides.length) return state.cardFixedAmounts[overrides[overrides.length - 1]][item.id];
+  return item.amount;
+}
+function getTierAmount(tier, monthKey){
+  const overrides = Object.keys(state.cardTierAmounts)
+    .filter(k => k <= monthKey && state.cardTierAmounts[k][tier.id] !== undefined)
+    .sort();
+  if(overrides.length) return state.cardTierAmounts[overrides[overrides.length - 1]][tier.id];
+  return tier.amount;
+}
+function getCardTotal(card, monthKey){
+  const fixedSum = (card.fixedItems || []).reduce((s,f) => s + getFixedItemAmount(f, monthKey), 0);
+  const entries = (state.cardEntries[monthKey] || {})[card.id] || [];
+  const countedEntries = entries.filter(e => !e.excluded).reduce((s,e) => s + e.amount, 0);
+  return fixedSum + countedEntries;
+}
+function getCardPaidTotal(card, monthKey){
+  const fixedSum = (card.fixedItems || []).reduce((s,f) => s + getFixedItemAmount(f, monthKey), 0);
+  const entries = (state.cardEntries[monthKey] || {})[card.id] || [];
+  return fixedSum + entries.reduce((s,e) => s + e.amount, 0);
+}
+function getCardTiers(card, monthKey){
+  return (card.tiers || [])
+    .map(t => Object.assign({}, t, { amount: getTierAmount(t, monthKey) }))
+    .sort((a,b) => a.amount - b.amount);
+}
+function getCardFinalTarget(card, monthKey){
+  const tiers = getCardTiers(card, monthKey);
+  return tiers.length ? tiers[tiers.length - 1].amount : null;
+}
 function getVisibleTransfers(monthKey){
   return state.transfers.filter(t =>
     (!t.createdMonth || t.createdMonth <= monthKey) &&
@@ -336,8 +406,10 @@ function renderHome(){
   const checks = state.transferChecks[monthKey] || {};
   const todoTransfers = getVisibleTransfers(monthKey).filter(t => !checks[t.id]);
 
-  const cm = state.cardMonthly[monthKey] || {};
-  const todoCards = state.cards.filter(c => c.target && ((cm[c.id] ?? c.fixed) < c.target));
+  const todoCards = state.cards.filter(c => {
+    const finalTarget = getCardFinalTarget(c, monthKey);
+    return finalTarget && getCardTotal(c, monthKey) < finalTarget;
+  });
 
   const today = new Date(); today.setHours(0,0,0,0);
   const soonDeposits = state.deposits.filter(d => {
@@ -367,10 +439,13 @@ function renderHome(){
     if(todoCards.length){
       html += `<div class="card">`;
       todoCards.forEach(c => {
-        const cur = cm[c.id] ?? c.fixed;
-        const remain = c.target - cur;
+        const cur = getCardTotal(c, monthKey);
+        const tiers = getCardTiers(c, monthKey);
+        const achieved = tiers.filter(t => cur >= t.amount);
+        const pending = tiers.find(t => cur < t.amount);
+        const stageLabel = achieved.length ? `${achieved.length}단계 달성 · ` : '';
         html += `<div class="row" onclick="switchTab('cards')" style="cursor:pointer">
-          <div class="info"><p class="title">${c.name} 목표 미달성</p><p class="desc">${formatWon(remain)} 남음</p></div>
+          <div class="info"><p class="title">${c.name} 목표 미달성</p><p class="desc">${stageLabel}${achieved.length + 1}단계까지 ${formatWon(pending.amount - cur)} 남음</p></div>
         </div>`;
       });
       html += `</div>`;
@@ -646,15 +721,16 @@ function deleteActualEntry(itemId, entryId){
 /* ---------- CARDS ---------- */
 function renderCards(){
   const el = document.getElementById('screen-cards');
-  const cm = state.cardMonthly[viewMonth] || {};
   let html = renderMonthNav();
   html += `<div class="card">`;
   let nextCard = null;
 
   state.cards.forEach((c, i) => {
-    const cur = cm[c.id] ?? c.fixed;
-    if(c.target && cur < c.target && !nextCard) nextCard = c;
-    const pct = c.target ? Math.min(100, Math.round(cur / c.target * 100)) : 0;
+    const cur = getCardTotal(c, viewMonth);
+    const paid = getCardPaidTotal(c, viewMonth);
+    const tiers = getCardTiers(c, viewMonth);
+    const finalTarget = getCardFinalTarget(c, viewMonth);
+    if(finalTarget && cur < finalTarget && !nextCard) nextCard = c;
 
     html += `<div class="row" style="display:block">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -665,16 +741,27 @@ function renderCards(){
           <button class="iconbtn" onclick="openCardModal('${c.id}')">✎</button>
         </div>
       </div>`;
-    if(c.target){
-      html += `
-      <div class="progress ${pct >= 100 ? 'done' : ''}"><div style="width:${pct}%"></div></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-        <input type="number" value="${cur}" style="width:120px;padding:7px;border:1px solid var(--border);border-radius:6px" onchange="updateCardUsage('${c.id}',this.value)">
-        <span class="desc">목표 ${formatWon(c.target)} · ${c.target - cur > 0 ? formatWon(c.target - cur) + ' 남음' : '완료'}</span>
+
+    if(tiers.length){
+      const pct = Math.min(100, Math.round(cur / finalTarget * 100));
+      const achieved = tiers.filter(t => cur >= t.amount);
+      const pending = tiers.find(t => cur < t.amount);
+      html += `<div class="progress ${pct >= 100 ? 'done' : ''}" style="position:relative;">
+        <div style="width:${pct}%"></div>
+        ${tiers.slice(0,-1).map(t => `<div style="position:absolute;left:${Math.min(100, t.amount/finalTarget*100)}%;top:0;width:2px;height:100%;background:var(--card);"></div>`).join('')}
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+        <span style="font-size:11px;color:var(--muted);">${achieved.length ? achieved.length + '단계 달성 ✓' : ''}</span>
+        <span style="font-size:11px;color:var(--muted);">${pending ? (achieved.length+1) + '단계 ' + formatWon(pending.amount) : '모든 단계 달성'}</span>
       </div>`;
-    } else {
-      html += `<p class="desc">목표 없음 · 남는 일반지출</p>`;
     }
+    html += `<div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:13px;color:var(--accent);">실적인정 ${formatWon(cur)}${paid !== cur ? ' · 총결제 ' + formatWon(paid) : ''}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+      <button class="iconbtn" style="padding:0;font-size:12px;color:var(--accent);" onclick="openCardEntriesModal('${c.id}')">내역보기 ›</button>
+      <button class="iconbtn" style="padding:0;font-size:12px;color:var(--accent);" onclick="openCardTiersModal('${c.id}')">목표·혜택 보기 ›</button>
+    </div>`;
     html += `</div>`;
   });
   html += `</div>`;
@@ -683,10 +770,122 @@ function renderCards(){
   }
   el.innerHTML = html;
 }
-function updateCardUsage(id, val){
-  if(!state.cardMonthly[viewMonth]) state.cardMonthly[viewMonth] = {};
-  state.cardMonthly[viewMonth][id] = parseInt(val, 10) || 0;
-  saveState(); render();
+function openCardEntriesModal(cardId){
+  const card = state.cards.find(c => c.id === cardId);
+  const entries = ((state.cardEntries[viewMonth] || {})[cardId] || []).slice().sort((a,b) => b.date.localeCompare(a.date));
+  const countedTotal = getCardTotal(card, viewMonth);
+  const paidTotal = getCardPaidTotal(card, viewMonth);
+  let html = `<p style="font-size:14px;font-weight:500;margin:0 0 4px;">${card.name} 지출내역</p>`;
+  html += `<p class="desc" style="margin:0 0 10px;">실적 인정 ${formatWon(countedTotal)}${paidTotal !== countedTotal ? ` · 실제 결제 ${formatWon(paidTotal)}` : ''}</p>`;
+
+  html += `<p style="font-size:13px;font-weight:500;margin:14px 0 6px;">고정지출실적</p>`;
+  html += (card.fixedItems && card.fixedItems.length) ? card.fixedItems.map(f => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
+      <div><span style="font-size:13px;">${f.label}</span>${f.date ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${f.date}</p>` : ''}</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:13px;">${formatWon(getFixedItemAmount(f, viewMonth))}</span>
+        <button class="iconbtn" onclick="openFixedItemModal('${cardId}','${f.id}')">✎</button>
+      </div>
+    </div>`).join('') : `<p class="desc" style="padding:4px 0">고정지출실적 없음</p>`;
+  html += `<div style="text-align:right;margin:6px 0 20px;">
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;font-size:12px;" onclick="openFixedItemModal('${cardId}', null)">+ 고정지출실적 추가</button>
+  </div>`;
+
+  html += `<p style="font-size:13px;font-weight:500;margin:0 0 6px;">사용내역</p>`;
+  html += entries.length ? entries.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <div><span style="font-size:13px;">${e.date}</span>${e.excluded ? `<span style="font-size:10px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;">실적제외</span>` : ''}${e.memo ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${e.memo}</p>` : ''}</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:13px;${e.excluded ? 'color:var(--muted);' : ''}">${formatWon(e.amount)}</span>
+        <button class="iconbtn" onclick="openCardUsageModal('${cardId}','${e.id}')">✎</button>
+      </div>
+    </div>`).join('') : `<p class="desc" style="padding:6px 0">아직 입력한 내역이 없어요</p>`;
+  html += `<div style="text-align:right;margin-top:8px;">
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;font-size:12px;" onclick="openCardUsageModal('${cardId}', null)">+ 사용내역 추가</button>
+  </div>`;
+  html += `<div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button></div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function openCardUsageModal(cardId, entryId){
+  const entries = (state.cardEntries[viewMonth] || {})[cardId] || [];
+  const item = entryId ? entries.find(e => e.id === entryId) : null;
+  const todayStr = new Date().toISOString().slice(0,10);
+  document.getElementById('modalContent').innerHTML = `
+    <div class="field"><label>날짜</label><input id="f-cdate" type="date" value="${item ? item.date : todayStr}"></div>
+    <div class="field"><label>금액</label><input id="f-camount" type="number" value="${item ? item.amount : ''}"></div>
+    <div class="field"><label>메모 (선택)</label><input id="f-cmemo" value="${item ? item.memo : ''}" placeholder="예: 마트, 주유"></div>
+    <div class="field" style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="f-cexcluded" style="width:auto;" ${item && item.excluded ? 'checked' : ''}>
+      <label for="f-cexcluded" style="margin:0;font-size:13px;color:var(--text);">이 결제는 카드 실적에서 제외</label>
+    </div>
+    <div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteCardEntry('${cardId}','${entryId}')">삭제</button>` : ''}
+      <button class="btn" onclick="openCardEntriesModal('${cardId}')">취소</button>
+      <button class="btn btn-primary" onclick="saveCardUsage('${cardId}', ${item ? `'${entryId}'` : 'null'})">저장</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveCardUsage(cardId, entryId){
+  const date = document.getElementById('f-cdate').value;
+  const amountRaw = document.getElementById('f-camount').value;
+  const memo = document.getElementById('f-cmemo').value.trim();
+  const excluded = document.getElementById('f-cexcluded').checked;
+  if(!date || amountRaw === ''){ alert('날짜와 금액을 입력해줘'); return; }
+  if(!state.cardEntries[viewMonth]) state.cardEntries[viewMonth] = {};
+  if(!state.cardEntries[viewMonth][cardId]) state.cardEntries[viewMonth][cardId] = [];
+  const list = state.cardEntries[viewMonth][cardId];
+  if(entryId){
+    const item = list.find(e => e.id === entryId);
+    item.date = date; item.amount = parseInt(amountRaw, 10) || 0; item.memo = memo; item.excluded = excluded;
+  } else {
+    list.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0, memo, excluded });
+  }
+  saveState(); render(); openCardEntriesModal(cardId);
+}
+function openFixedItemModal(cardId, itemId){
+  const card = state.cards.find(c => c.id === cardId);
+  const item = itemId ? card.fixedItems.find(f => f.id === itemId) : null;
+  const amountVal = item ? getFixedItemAmount(item, viewMonth) : '';
+  const modal = document.getElementById('modalContent');
+  modal.innerHTML = `
+    <div class="field"><label>항목명</label><input id="f-flabel" value="${item ? item.label : ''}" placeholder="예: 통신비"></div>
+    <div class="field"><label>날짜</label><input id="f-fdate" type="date" value="${item && item.date ? item.date : ''}"></div>
+    <div class="field"><label>금액 (${monthLabel(viewMonth)}부터 적용)</label><input id="f-famount" type="number" value="${amountVal}"></div>
+    <div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteFixedItem('${cardId}','${itemId}')">삭제</button>` : ''}
+      <button class="btn" onclick="openCardEntriesModal('${cardId}')">취소</button>
+      <button class="btn btn-primary" onclick="saveFixedItem('${cardId}', ${item ? `'${itemId}'` : 'null'})">저장</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveFixedItem(cardId, itemId){
+  const label = document.getElementById('f-flabel').value.trim();
+  const date = document.getElementById('f-fdate').value || null;
+  const amountRaw = document.getElementById('f-famount').value;
+  if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
+  const card = state.cards.find(c => c.id === cardId);
+  if(!card.fixedItems) card.fixedItems = [];
+  if(itemId){
+    const item = card.fixedItems.find(f => f.id === itemId);
+    item.label = label; item.date = date;
+    if(!state.cardFixedAmounts[viewMonth]) state.cardFixedAmounts[viewMonth] = {};
+    state.cardFixedAmounts[viewMonth][itemId] = parseInt(amountRaw, 10) || 0;
+  } else {
+    card.fixedItems.push({ id: uid(), label, date, amount: parseInt(amountRaw, 10) || 0 });
+  }
+  saveState(); render(); openCardEntriesModal(cardId);
+}
+function deleteFixedItem(cardId, itemId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    const card = state.cards.find(c => c.id === cardId);
+    card.fixedItems = card.fixedItems.filter(f => f.id !== itemId);
+    saveState(); render(); openCardEntriesModal(cardId);
+  });
+}
+function deleteCardEntry(cardId, entryId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.cardEntries[viewMonth][cardId] = state.cardEntries[viewMonth][cardId].filter(e => e.id !== entryId);
+    saveState(); render(); openCardEntriesModal(cardId);
+  });
 }
 function moveCard(id, delta){
   const idx = state.cards.findIndex(c => c.id === id);
@@ -696,13 +895,66 @@ function moveCard(id, delta){
   [arr[idx], arr[newIdx]] = [arr[newIdx], arr[idx]];
   saveState(); render();
 }
+function openCardTiersModal(cardId){
+  const card = state.cards.find(c => c.id === cardId);
+  const tiers = getCardTiers(card, viewMonth);
+  let html = `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">${card.name} 목표 단계</p>`;
+  html += tiers.length ? tiers.map((t,i) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <div>
+        <span style="font-size:13px;">${i+1}단계 · ${formatWon(t.amount)}</span>
+        ${t.benefit ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${t.benefit}</p>` : ''}
+      </div>
+      <button class="iconbtn" onclick="openTierModal('${cardId}','${t.id}')">✎</button>
+    </div>`).join('') : `<p class="desc" style="padding:6px 0">아직 등록된 목표가 없어요</p>`;
+  html += `<div style="text-align:right;margin-top:8px;">
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;font-size:12px;" onclick="openTierModal('${cardId}', null)">+ 단계 추가</button>
+  </div>`;
+  html += `<div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button></div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function openTierModal(cardId, tierId){
+  const card = state.cards.find(c => c.id === cardId);
+  const item = tierId ? card.tiers.find(t => t.id === tierId) : null;
+  const amountVal = item ? getTierAmount(item, viewMonth) : '';
+  document.getElementById('modalContent').innerHTML = `
+    <div class="field"><label>목표금액 (${monthLabel(viewMonth)}부터 적용)</label><input id="f-tamount" type="number" value="${amountVal}"></div>
+    <div class="field"><label>혜택 내용</label><input id="f-tbenefit" value="${item ? item.benefit : ''}" placeholder="예: 스타벅스 할인"></div>
+    <div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteTier('${cardId}','${tierId}')">삭제</button>` : ''}
+      <button class="btn" onclick="openCardTiersModal('${cardId}')">취소</button>
+      <button class="btn btn-primary" onclick="saveTier('${cardId}', ${item ? `'${tierId}'` : 'null'})">저장</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveTier(cardId, tierId){
+  const amount = parseInt(document.getElementById('f-tamount').value, 10) || 0;
+  const benefit = document.getElementById('f-tbenefit').value.trim();
+  if(!amount){ alert('목표금액을 입력해줘'); return; }
+  const card = state.cards.find(c => c.id === cardId);
+  if(!card.tiers) card.tiers = [];
+  if(tierId){
+    const item = card.tiers.find(t => t.id === tierId);
+    item.benefit = benefit;
+    if(!state.cardTierAmounts[viewMonth]) state.cardTierAmounts[viewMonth] = {};
+    state.cardTierAmounts[viewMonth][tierId] = amount;
+  } else {
+    card.tiers.push({ id: uid(), amount, benefit });
+  }
+  saveState(); render(); openCardTiersModal(cardId);
+}
+function deleteTier(cardId, tierId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    const card = state.cards.find(c => c.id === cardId);
+    card.tiers = card.tiers.filter(t => t.id !== tierId);
+    saveState(); render(); openCardTiersModal(cardId);
+  });
+}
 function openCardModal(id){
   const item = id ? state.cards.find(c => c.id === id) : null;
   const modal = document.getElementById('modalContent');
   modal.innerHTML = `
     <div class="field"><label>카드명</label><input id="f-name" value="${item ? item.name : ''}"></div>
-    <div class="field"><label>고정실적</label><input id="f-fixed" type="number" value="${item ? item.fixed : 0}"></div>
-    <div class="field"><label>목표 (없으면 비워두기)</label><input id="f-target" type="number" value="${item && item.target ? item.target : ''}"></div>
     <div class="modal-actions">
       ${item ? `<button class="btn btn-danger" onclick="deleteCard('${id}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
@@ -712,15 +964,12 @@ function openCardModal(id){
 }
 function saveCard(id){
   const name = document.getElementById('f-name').value.trim();
-  const fixed = parseInt(document.getElementById('f-fixed').value, 10) || 0;
-  const targetRaw = document.getElementById('f-target').value;
-  const target = targetRaw ? (parseInt(targetRaw, 10) || 0) : null;
   if(!name){ alert('카드명을 입력해줘'); return; }
   if(id){
     const item = state.cards.find(c => c.id === id);
-    item.name = name; item.fixed = fixed; item.target = target;
+    item.name = name;
   } else {
-    state.cards.push({ id: uid(), name, fixed, target });
+    state.cards.push({ id: uid(), name, fixedItems: [], tiers: [] });
   }
   saveState(); closeModal(); render();
 }
@@ -1143,7 +1392,7 @@ function saveBalanceLog(id){
 
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v15';
+const APP_VERSION = 'v22';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
