@@ -73,7 +73,10 @@
 
 <header>
   <h1>가계부</h1>
-  <span class="sub" id="screenDate"></span>
+  <div style="display:flex;align-items:center;gap:10px;">
+    <span class="sub" id="screenDate"></span>
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;font-size:11px;" onclick="openBackupModal()">백업</button>
+  </div>
 </header>
 
 <section id="screen-home" class="screen active"></section>
@@ -721,9 +724,8 @@ function deleteActualEntry(itemId, entryId){
 /* ---------- CARDS ---------- */
 function renderCards(){
   const el = document.getElementById('screen-cards');
-  let html = renderMonthNav();
-  html += `<div class="card">`;
   let nextCard = null;
+  let listHtml = `<div class="card">`;
 
   state.cards.forEach((c, i) => {
     const cur = getCardTotal(c, viewMonth);
@@ -732,7 +734,7 @@ function renderCards(){
     const finalTarget = getCardFinalTarget(c, viewMonth);
     if(finalTarget && cur < finalTarget && !nextCard) nextCard = c;
 
-    html += `<div class="row" style="display:block">
+    listHtml += `<div class="row" style="display:block">
       <div style="display:flex;justify-content:space-between;align-items:center">
         <span class="title">${i+1}. ${c.name}</span>
         <div>
@@ -746,28 +748,31 @@ function renderCards(){
       const pct = Math.min(100, Math.round(cur / finalTarget * 100));
       const achieved = tiers.filter(t => cur >= t.amount);
       const pending = tiers.find(t => cur < t.amount);
-      html += `<div class="progress ${pct >= 100 ? 'done' : ''}" style="position:relative;">
+      listHtml += `<div class="progress ${pct >= 100 ? 'done' : ''}" style="position:relative;">
         <div style="width:${pct}%"></div>
         ${tiers.slice(0,-1).map(t => `<div style="position:absolute;left:${Math.min(100, t.amount/finalTarget*100)}%;top:0;width:2px;height:100%;background:var(--card);"></div>`).join('')}
       </div>
       <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
         <span style="font-size:11px;color:var(--muted);">${achieved.length ? achieved.length + '단계 달성 ✓' : ''}</span>
-        <span style="font-size:11px;color:var(--muted);">${pending ? (achieved.length+1) + '단계 ' + formatWon(pending.amount) : '모든 단계 달성'}</span>
+        <span style="font-size:11px;color:var(--muted);">${pending ? (achieved.length+1) + '단계 ' + formatWon(pending.amount) + ' · ' + formatWon(pending.amount - cur) + ' 남음' : '모든 단계 달성'}</span>
       </div>`;
     }
-    html += `<div style="display:flex;justify-content:space-between;align-items:center">
+    listHtml += `<div style="display:flex;justify-content:space-between;align-items:center">
       <span style="font-size:13px;color:var(--accent);">실적인정 ${formatWon(cur)}${paid !== cur ? ' · 총결제 ' + formatWon(paid) : ''}</span>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
       <button class="iconbtn" style="padding:0;font-size:12px;color:var(--accent);" onclick="openCardEntriesModal('${c.id}')">내역보기 ›</button>
       <button class="iconbtn" style="padding:0;font-size:12px;color:var(--accent);" onclick="openCardTiersModal('${c.id}')">목표·혜택 보기 ›</button>
     </div>`;
-    html += `</div>`;
+    listHtml += `</div>`;
   });
-  html += `</div>`;
+  listHtml += `</div>`;
+
+  let html = renderMonthNav();
   if(nextCard){
     html += `<div class="banner">다음 지출은 ${nextCard.name}로</div>`;
   }
+  html += listHtml;
   el.innerHTML = html;
 }
 function openCardEntriesModal(cardId){
@@ -1391,8 +1396,67 @@ function saveBalanceLog(id){
 }
 
 
+/* ---------- BACKUP ---------- */
+function openBackupModal(){
+  const modal = document.getElementById('modalContent');
+  modal.innerHTML = `
+    <p style="font-size:14px;font-weight:500;margin:0 0 10px;">데이터 백업</p>
+    <p class="desc" style="margin:0 0 16px;">가끔 내보내기 해두면 폰을 바꾸거나 브라우저 데이터를 지워도 다시 불러올 수 있어요.</p>
+    <button class="btn btn-primary" style="width:100%;margin-bottom:10px;" onclick="exportData()">내보내기 (파일로 저장)</button>
+    <label class="btn" style="width:100%;display:block;text-align:center;cursor:pointer;box-sizing:border-box;">
+      가져오기 (파일 불러오기)
+      <input type="file" accept="application/json" style="display:none;" onchange="importData(this)">
+    </label>
+    <div class="modal-actions" style="margin-top:14px;">
+      <button class="btn" onclick="closeModal()">닫기</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function exportData(){
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const today = new Date().toISOString().slice(0,10);
+  a.href = url;
+  a.download = `가계부_백업_${today}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+let pendingImportData = null;
+function importData(input){
+  const file = input.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    let parsed;
+    try {
+      parsed = JSON.parse(e.target.result);
+    } catch(err){
+      alert('파일을 읽을 수 없어요. JSON 백업 파일이 맞는지 확인해줘.');
+      return;
+    }
+    pendingImportData = parsed;
+    document.getElementById('modalContent').innerHTML = `
+      <p style="font-size:15px;line-height:1.6;margin:4px 0 20px;">불러오면 지금 있는 데이터를 덮어써요. 계속할까요?</p>
+      <div class="modal-actions">
+        <button class="btn" onclick="openBackupModal()">취소</button>
+        <button class="btn btn-primary" onclick="confirmImport()">불러오기</button>
+      </div>`;
+    document.getElementById('modalOverlay').classList.add('open');
+  };
+  reader.readAsText(file);
+}
+function confirmImport(){
+  state = migrateState(pendingImportData);
+  pendingImportData = null;
+  saveState(); closeModal(); render();
+  alert('불러오기 완료');
+}
+
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v22';
+const APP_VERSION = 'v24';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
