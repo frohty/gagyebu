@@ -113,6 +113,8 @@ function defaultData(){
     transferChecks: {},
     transferActuals: {},
     transferBudgets: {},
+    transferBudgetEntries: {},
+    transferActualEntries: {},
     cards: [
       { id: uid(), name:'롯데카드',          fixed:750000,  target:750000 },
       { id: uid(), name:'iD STATION GS',     fixed:520000,  target:800000 },
@@ -123,7 +125,7 @@ function defaultData(){
     cardMonthly: {},
     deposits: [],
     debts: [],
-    spouseSupport: [],
+    incomeLog: [],
     incomeSources: [],
     incomeMonthly: {}
   };
@@ -140,8 +142,10 @@ function parseWonFromLabel(label){
 function migrateState(s){
   if(!s.transferActuals) s.transferActuals = {};
   if(!s.transferBudgets) s.transferBudgets = {};
+  if(!s.transferBudgetEntries) s.transferBudgetEntries = {};
+  if(!s.transferActualEntries) s.transferActualEntries = {};
   if(!s.debts) s.debts = [];
-  if(!s.spouseSupport) s.spouseSupport = [];
+  if(!s.incomeLog) s.incomeLog = [];
   if(!s.incomeSources) s.incomeSources = [];
   if(!s.incomeMonthly) s.incomeMonthly = {};
   if(s.salaryMonthly && Object.keys(s.salaryMonthly).length && !s.incomeSources.some(x => x.name === '급여')){
@@ -245,18 +249,25 @@ function fundPeriodsAsOf(item, asOfDate){
 function fundPrincipalAsOf(item, asOfDate){
   return item.contributionAmount * fundPeriodsAsOf(item, asOfDate);
 }
-function getSpouseSupportTotal(monthKey){
-  return state.spouseSupport
+function getIncomeLogTotal(monthKey){
+  return state.incomeLog
     .filter(s => s.date.slice(0,7) === monthKey)
     .reduce((sum, s) => sum + s.amount, 0);
 }
 
 function getEffectiveBudget(item, monthKey){
+  const entries = (state.transferBudgetEntries[monthKey] || {})[item.id];
+  if(entries && entries.length) return entries.reduce((s,e) => s + e.amount, 0);
   const overrides = Object.keys(state.transferBudgets)
     .filter(k => k <= monthKey && state.transferBudgets[k][item.id] !== undefined)
     .sort();
   if(overrides.length) return state.transferBudgets[overrides[overrides.length - 1]][item.id];
   return item.budget;
+}
+function getActualAmount(item, monthKey){
+  const entries = (state.transferActualEntries[monthKey] || {})[item.id];
+  if(entries && entries.length) return entries.reduce((s,e) => s + e.amount, 0);
+  return (state.transferActuals[monthKey] || {})[item.id];
 }
 function getVisibleTransfers(monthKey){
   return state.transfers.filter(t =>
@@ -393,32 +404,17 @@ function renderTransfer(){
 
   const incomeVals = state.incomeMonthly[viewMonth] || {};
   const incomeTotal = state.incomeSources.reduce((s,src) => s + (incomeVals[src.id] || 0), 0);
-  const spouseTotal = getSpouseSupportTotal(viewMonth);
-  const incomeGrand = incomeTotal + spouseTotal;
+  const logTotal = getIncomeLogTotal(viewMonth);
+  const incomeGrand = incomeTotal + logTotal;
   const remainder = incomeGrand - total;
 
   html += `<div class="card">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0;">
-      <p style="font-size:13px;font-weight:500;margin:0;">이번달 수입</p>
-      <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;" onclick="openIncomeSourceModal(null)">+ 항목 추가</button>
-    </div>`;
-  state.incomeSources.forEach(src => {
-    const val = incomeVals[src.id] || 0;
-    html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:13px;">${src.name}</span>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <input type="number" value="${val || ''}" placeholder="0" style="width:110px;text-align:right;padding:6px;border:1px solid var(--border);border-radius:6px;" onchange="updateIncomeAmount('${src.id}',this.value)">
-        <button class="iconbtn" onclick="openIncomeSourceModal('${src.id}')">✎</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:14px;">이번달 수입 합계</span>
+      <div style="display:flex;align-items:center;gap:8px;cursor:pointer;" onclick="openIncomeManageModal()">
+        <span style="font-size:14px;">${formatWon(incomeGrand)}</span>
+        <span style="font-size:12px;color:var(--accent);">관리 ›</span>
       </div>
-    </div>`;
-  });
-  html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:13px;color:var(--text2);">배우자 지원 (부채현황 기록 합계)</span>
-      <span style="font-size:13px;">${formatWon(spouseTotal)}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;font-weight:500;">수입 합계</span>
-      <span style="font-size:14px;font-weight:500;">${formatWon(incomeGrand)}</span>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
       <span style="font-size:13px;color:var(--text2);">이체 예산</span>
@@ -439,17 +435,23 @@ function renderTransfer(){
   html += `<div class="card">`;
   visible.forEach(t => {
     const on = !!checks[t.id];
-    const actual = actuals[t.id];
+    const actual = getActualAmount(t, viewMonth);
     const budget = getEffectiveBudget(t, viewMonth);
-    html += `<div class="row">
-      <div class="check ${on ? 'done' : ''}" onclick="toggleTransfer('${t.id}')">✓</div>
-      <div class="info">
-        <p class="title">${t.bank}</p>
-        <p class="desc">${t.memo}</p>
-        ${actual != null ? `<p class="desc" style="color:var(--accent)">실이체 ${formatWon(actual)}</p>` : ''}
+    html += `<div class="row" style="display:block">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <div class="check ${on ? 'done' : ''}" onclick="toggleTransfer('${t.id}')">✓</div>
+        <div class="info">
+          <p class="title">${t.bank}</p>
+          <p class="desc">${t.memo}</p>
+          ${actual != null ? `<p class="desc" style="color:var(--accent)">실이체 ${formatWon(actual)}</p>` : ''}
+        </div>
+        <span class="amt">예산 ${formatWon(budget)}</span>
+        <button class="iconbtn" onclick="openTransferModal('${t.id}')">✎</button>
       </div>
-      <span class="amt">예산 ${formatWon(budget)}</span>
-      <button class="iconbtn" onclick="openTransferModal('${t.id}')">✎</button>
+      <div style="display:flex;gap:14px;padding-left:34px;margin-top:2px;">
+        <button class="iconbtn" style="padding:0;font-size:11px;color:var(--muted);" onclick="openBudgetEntriesModal('${t.id}')">예산 세부</button>
+        <button class="iconbtn" style="padding:0;font-size:11px;color:var(--muted);" onclick="openActualEntriesModal('${t.id}')">실이체 세부</button>
+      </div>
     </div>`;
   });
   html += `</div>`;
@@ -460,6 +462,41 @@ function updateIncomeAmount(sourceId, val){
   state.incomeMonthly[viewMonth][sourceId] = parseInt(val, 10) || 0;
   saveState(); render();
 }
+function openIncomeManageModal(){
+  const modal = document.getElementById('modalContent');
+  const incomeVals = state.incomeMonthly[viewMonth] || {};
+  let html = `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">급여</p>`;
+  html += state.incomeSources.length ? state.incomeSources.map(src => {
+    const val = incomeVals[src.id] || 0;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:13px;">${src.name}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="number" value="${val || ''}" placeholder="0" style="width:100px;text-align:right;padding:6px;border:1px solid var(--border);border-radius:6px;" onchange="updateIncomeAmount('${src.id}',this.value)">
+        <button class="iconbtn" onclick="openIncomeSourceModal('${src.id}')">✎</button>
+      </div>
+    </div>`;
+  }).join('') : `<p class="desc" style="padding:6px 0">아직 등록된 항목이 없어요</p>`;
+  html += `<div style="text-align:right;margin:8px 0 22px;">
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="openIncomeSourceModal(null)">+ 항목 추가</button>
+  </div>`;
+
+  html += `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">기타수입</p>`;
+  const logs = state.incomeLog.slice().sort((a,b) => b.date.localeCompare(a.date));
+  html += logs.length ? logs.map(s => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <div><span style="font-size:13px;">${s.date}</span>${s.memo ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${s.memo}</p>` : ''}</div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:13px;">${formatWon(s.amount)}</span>
+        <button class="iconbtn" onclick="deleteIncomeLog('${s.id}')">✕</button>
+      </div>
+    </div>`).join('') : `<p class="desc" style="padding:6px 0">아직 기록이 없어요</p>`;
+  html += `<div style="text-align:right;margin-top:8px;">
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="openIncomeLogModal()">+ 기록추가</button>
+  </div>`;
+
+  html += `<div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button></div>`;
+  modal.innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('open');
+}
 function openIncomeSourceModal(id){
   const item = id ? state.incomeSources.find(s => s.id === id) : null;
   const modal = document.getElementById('modalContent');
@@ -467,7 +504,7 @@ function openIncomeSourceModal(id){
     <div class="field"><label>항목 이름</label><input id="f-iname" value="${item ? item.name : ''}" placeholder="예: 급여(2차)"></div>
     <div class="modal-actions">
       ${item ? `<button class="btn btn-danger" onclick="deleteIncomeSource('${id}')">삭제</button>` : ''}
-      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn" onclick="openIncomeManageModal()">취소</button>
       <button class="btn btn-primary" onclick="saveIncomeSource(${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
   document.getElementById('modalOverlay').classList.add('open');
@@ -480,12 +517,12 @@ function saveIncomeSource(id){
   } else {
     state.incomeSources.push({ id: uid(), name });
   }
-  saveState(); closeModal(); render();
+  saveState(); render(); openIncomeManageModal();
 }
 function deleteIncomeSource(id){
   confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
     state.incomeSources = state.incomeSources.filter(s => s.id !== id);
-    saveState(); closeModal(); render();
+    saveState(); render(); openIncomeManageModal();
   });
 }
 function toggleTransfer(id){
@@ -541,6 +578,68 @@ function deleteTransfer(id){
       item.endedMonth = viewMonth;
     }
     saveState(); closeModal(); render();
+  });
+}
+function renderEntriesModal(title, entries, addFnName, delFnName, itemId){
+  let html = `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">${title}</p>`;
+  html += entries.length ? entries.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:13px;">${e.label}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:13px;">${formatWon(e.amount)}</span>
+        <button class="iconbtn" onclick="${delFnName}('${itemId}','${e.id}')">✕</button>
+      </div>
+    </div>`).join('') : `<p class="desc" style="padding:6px 0">아직 세부내역이 없어요</p>`;
+  const total = entries.reduce((s,e) => s + e.amount, 0);
+  html += `<div style="display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid var(--border);margin-top:4px;">
+    <span style="font-size:13px;font-weight:500;">합계</span><span style="font-size:13px;font-weight:500;">${formatWon(total)}</span>
+  </div>`;
+  html += `
+    <div class="field" style="margin-top:14px;"><label>항목명</label><input id="f-elabel" placeholder="예: 롯데카드 청구서"></div>
+    <div class="field"><label>금액</label><input id="f-eamount" type="number"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">닫기</button>
+      <button class="btn btn-primary" onclick="${addFnName}('${itemId}')">추가</button>
+    </div>`;
+  return html;
+}
+function openBudgetEntriesModal(itemId){
+  const entries = (state.transferBudgetEntries[viewMonth] || {})[itemId] || [];
+  document.getElementById('modalContent').innerHTML = renderEntriesModal('예산 세부내역', entries, 'addBudgetEntry', 'deleteBudgetEntry', itemId);
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function addBudgetEntry(itemId){
+  const label = document.getElementById('f-elabel').value.trim();
+  const amountRaw = document.getElementById('f-eamount').value;
+  if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
+  if(!state.transferBudgetEntries[viewMonth]) state.transferBudgetEntries[viewMonth] = {};
+  if(!state.transferBudgetEntries[viewMonth][itemId]) state.transferBudgetEntries[viewMonth][itemId] = [];
+  state.transferBudgetEntries[viewMonth][itemId].push({ id: uid(), label, amount: parseInt(amountRaw, 10) || 0 });
+  saveState(); render(); openBudgetEntriesModal(itemId);
+}
+function deleteBudgetEntry(itemId, entryId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.transferBudgetEntries[viewMonth][itemId] = state.transferBudgetEntries[viewMonth][itemId].filter(e => e.id !== entryId);
+    saveState(); render(); openBudgetEntriesModal(itemId);
+  });
+}
+function openActualEntriesModal(itemId){
+  const entries = (state.transferActualEntries[viewMonth] || {})[itemId] || [];
+  document.getElementById('modalContent').innerHTML = renderEntriesModal('실이체 세부내역', entries, 'addActualEntry', 'deleteActualEntry', itemId);
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function addActualEntry(itemId){
+  const label = document.getElementById('f-elabel').value.trim();
+  const amountRaw = document.getElementById('f-eamount').value;
+  if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
+  if(!state.transferActualEntries[viewMonth]) state.transferActualEntries[viewMonth] = {};
+  if(!state.transferActualEntries[viewMonth][itemId]) state.transferActualEntries[viewMonth][itemId] = [];
+  state.transferActualEntries[viewMonth][itemId].push({ id: uid(), label, amount: parseInt(amountRaw, 10) || 0 });
+  saveState(); render(); openActualEntriesModal(itemId);
+}
+function deleteActualEntry(itemId, entryId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.transferActualEntries[viewMonth][itemId] = state.transferActualEntries[viewMonth][itemId].filter(e => e.id !== entryId);
+    saveState(); render(); openActualEntriesModal(itemId);
   });
 }
 
@@ -919,58 +1018,33 @@ function renderDebts(){
   html += limit.length ? limit.map(renderDebtRow).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 한도대출이 없어요</p>`;
   html += `</div>`;
 
-  const thisMonth = getMonthKey(new Date());
-  const spouseTotal = getSpouseSupportTotal(thisMonth);
-  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 8px;">
-    <span style="font-size:13px;font-weight:500;">배우자 지원금</span>
-    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="openSpouseSupportModal(null)">+ 기록추가</button>
-  </div>`;
-  html += `<div class="banner"><div style="display:flex;justify-content:space-between">
-    <span>이번달 받은 금액</span><span>${formatWon(spouseTotal)}</span>
-  </div></div>`;
-  const supportList = state.spouseSupport.slice().sort((a,b) => b.date.localeCompare(a.date));
-  html += `<div class="card">`;
-  if(supportList.length){
-    html += supportList.map(s => `<div class="row">
-      <div class="info">
-        <p class="title">${s.date}</p>
-        ${s.memo ? `<p class="desc">${s.memo}</p>` : ''}
-      </div>
-      <span class="amt">${formatWon(s.amount)}</span>
-      <button class="iconbtn" onclick="deleteSpouseSupport('${s.id}')">✕</button>
-    </div>`).join('');
-  } else {
-    html += `<p class="desc" style="padding:12px 0">아직 기록이 없어요</p>`;
-  }
-  html += `</div>`;
-
   el.innerHTML = html;
 }
-function openSpouseSupportModal(id){
+function openIncomeLogModal(id){
   const modal = document.getElementById('modalContent');
   const todayStr = new Date().toISOString().slice(0,10);
   modal.innerHTML = `
     <div class="field"><label>날짜</label><input id="f-sdate" type="date" value="${todayStr}"></div>
     <div class="field"><label>금액</label><input id="f-samount" type="number"></div>
-    <div class="field"><label>용도 (메모)</label><input id="f-smemo" placeholder="예: 전세자금대출 이자"></div>
+    <div class="field"><label>출처 (메모)</label><input id="f-smemo" placeholder="예: 배우자 입금, 병원비 실비"></div>
     <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="saveSpouseSupport()">저장</button>
+      <button class="btn" onclick="openIncomeManageModal()">취소</button>
+      <button class="btn btn-primary" onclick="saveIncomeLog()">저장</button>
     </div>`;
   document.getElementById('modalOverlay').classList.add('open');
 }
-function saveSpouseSupport(){
+function saveIncomeLog(){
   const date = document.getElementById('f-sdate').value;
   const amountRaw = document.getElementById('f-samount').value;
   const memo = document.getElementById('f-smemo').value.trim();
   if(!date || amountRaw === ''){ alert('날짜와 금액을 입력해줘'); return; }
-  state.spouseSupport.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0, memo });
-  saveState(); closeModal(); render();
+  state.incomeLog.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0, memo });
+  saveState(); render(); openIncomeManageModal();
 }
-function deleteSpouseSupport(id){
+function deleteIncomeLog(id){
   confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
-    state.spouseSupport = state.spouseSupport.filter(s => s.id !== id);
-    saveState(); closeModal(); render();
+    state.incomeLog = state.incomeLog.filter(s => s.id !== id);
+    saveState(); render(); openIncomeManageModal();
   });
 }
 function openDebtModal(type, id){
@@ -1069,7 +1143,7 @@ function saveBalanceLog(id){
 
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v14';
+const APP_VERSION = 'v15';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
