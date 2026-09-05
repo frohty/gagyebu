@@ -80,6 +80,7 @@
 <section id="screen-transfer" class="screen"></section>
 <section id="screen-cards" class="screen"></section>
 <section id="screen-deposits" class="screen"></section>
+<section id="screen-debts" class="screen"></section>
 
 <button class="addbtn" id="addBtn" style="display:none">+</button>
 
@@ -87,7 +88,8 @@
   <button data-tab="home" class="active">홈</button>
   <button data-tab="transfer">이체체크</button>
   <button data-tab="cards">카드지출</button>
-  <button data-tab="deposits">예금현황</button>
+  <button data-tab="deposits">저축현황</button>
+  <button data-tab="debts">부채현황</button>
 </nav>
 
 <div class="modal-overlay" id="modalOverlay">
@@ -119,22 +121,61 @@ function defaultData(){
       { id: uid(), name:'우리 EVERY 1',      fixed:0,       target:null }
     ],
     cardMonthly: {},
-    deposits: [
-      { id: uid(), name:'새마을금고 적금',  amountLabel:'월 30만원',   startDate:'2025-12-01', term:12,   memo:'', matured:false },
-      { id: uid(), name:'우리 적금',        amountLabel:'월 30만원',   startDate:'2026-01-01', term:12,   memo:'', matured:false },
-      { id: uid(), name:'카카오연금저축',   amountLabel:'월 10만원',   startDate:'2026-01-01', term:null, memo:'24년12월부터 30만원, 26년1월부터 10만원', matured:false },
-      { id: uid(), name:'카뱅 자유적금',    amountLabel:'누적 120만원', startDate:'2025-01-30', term:null, memo:'선민 80만 + 현금 30만 + 새마을적금 37만', matured:false },
-      { id: uid(), name:'카뱅예금',         amountLabel:'109만원',     startDate:'2026-01-30', term:null, memo:'', matured:false },
-      { id: uid(), name:'새마을예금',       amountLabel:'40만원',      startDate:'2026-03-17', term:null, memo:'', matured:false }
-    ]
+    deposits: [],
+    debts: [],
+    spouseSupport: [],
+    incomeSources: [],
+    incomeMonthly: {}
   };
 }
 
+function parseWonFromLabel(label){
+  if(!label) return 0;
+  const s = String(label).replace(/,/g, '');
+  const manMatch = s.match(/(\d+(?:\.\d+)?)\s*만/);
+  if(manMatch) return Math.round(parseFloat(manMatch[1]) * 10000);
+  const numMatch = s.match(/(\d+)/g);
+  return numMatch ? parseInt(numMatch[numMatch.length - 1], 10) : 0;
+}
 function migrateState(s){
   if(!s.transferActuals) s.transferActuals = {};
   if(!s.transferBudgets) s.transferBudgets = {};
+  if(!s.debts) s.debts = [];
+  if(!s.spouseSupport) s.spouseSupport = [];
+  if(!s.incomeSources) s.incomeSources = [];
+  if(!s.incomeMonthly) s.incomeMonthly = {};
+  if(s.salaryMonthly && Object.keys(s.salaryMonthly).length && !s.incomeSources.some(x => x.name === '급여')){
+    const salaryId = uid();
+    s.incomeSources.push({ id: salaryId, name: '급여' });
+    Object.keys(s.salaryMonthly).forEach(mk => {
+      if(!s.incomeMonthly[mk]) s.incomeMonthly[mk] = {};
+      s.incomeMonthly[mk][salaryId] = s.salaryMonthly[mk];
+    });
+  }
   (s.transfers || []).forEach(t => {
     if(t.budget === undefined) t.budget = (t.amount !== undefined ? t.amount : 0);
+  });
+  (s.deposits || []).forEach(d => {
+    if(d.type) return;
+    if(d.term !== undefined && d.term !== null){
+      d.type = '적금';
+      d.openDate = d.startDate;
+      d.maturityDate = addMonthsToDate(d.startDate, d.term).toISOString().slice(0,10);
+      d.monthlyAmount = parseWonFromLabel(d.amountLabel);
+      d.interestRate = 0;
+    } else if(/연금|펀드/.test(d.name || '')){
+      d.type = '펀드연금';
+      d.frequency = '월';
+      d.contributionAmount = parseWonFromLabel(d.amountLabel);
+      d.openDate = d.startDate;
+      d.valuations = d.valuations || [];
+    } else {
+      d.type = '예금';
+      d.openDate = d.startDate;
+      d.maturityDate = null;
+      d.principalAmount = parseWonFromLabel(d.amountLabel);
+      d.interestRate = 0;
+    }
   });
   return s;
 }
@@ -163,6 +204,52 @@ function addMonthsToDate(dateStr, months){
   return d;
 }
 function daysBetween(a,b){ return Math.round((b - a) / 86400000); }
+function monthsBetween(d1, d2){
+  let months = (d2.getFullYear() - d1.getFullYear()) * 12 + (d2.getMonth() - d1.getMonth());
+  if(d2.getDate() < d1.getDate()) months -= 1;
+  return Math.max(0, months);
+}
+
+function savingsProgress(item){
+  const open = new Date(item.openDate + 'T00:00:00');
+  const today = new Date(); today.setHours(0,0,0,0);
+  const maturity = item.maturityDate ? new Date(item.maturityDate + 'T00:00:00') : null;
+  const totalMonths = maturity ? monthsBetween(open, maturity) : null;
+  let elapsedMonths = monthsBetween(open, today);
+  if(totalMonths != null) elapsedMonths = Math.min(elapsedMonths, totalMonths);
+  const principal = item.monthlyAmount * elapsedMonths;
+  const rate = (item.interestRate || 0) / 100;
+  const interest = item.monthlyAmount * rate * (elapsedMonths * (elapsedMonths + 1)) / (2 * 12);
+  const diff = maturity ? daysBetween(today, maturity) : null;
+  const pct = totalMonths ? Math.min(100, Math.round(elapsedMonths / totalMonths * 100)) : 0;
+  return { elapsedMonths, totalMonths, principal, interest, total: principal + interest, diff, pct };
+}
+function depositProgress(item){
+  const open = new Date(item.openDate + 'T00:00:00');
+  const today = new Date(); today.setHours(0,0,0,0);
+  const maturity = item.maturityDate ? new Date(item.maturityDate + 'T00:00:00') : null;
+  const totalDays = maturity ? daysBetween(open, maturity) : null;
+  let elapsedDays = daysBetween(open, today);
+  if(totalDays != null) elapsedDays = Math.min(elapsedDays, totalDays);
+  const rate = (item.interestRate || 0) / 100;
+  const interest = item.principalAmount * rate * elapsedDays / 365;
+  const diff = maturity ? daysBetween(today, maturity) : null;
+  const pct = totalDays ? Math.min(100, Math.round(elapsedDays / totalDays * 100)) : 0;
+  return { principal: item.principalAmount, interest, total: item.principalAmount + interest, diff, pct };
+}
+function fundPeriodsAsOf(item, asOfDate){
+  const open = new Date(item.openDate + 'T00:00:00');
+  let periods = item.frequency === '주' ? Math.floor(daysBetween(open, asOfDate) / 7) : monthsBetween(open, asOfDate);
+  return Math.max(0, periods);
+}
+function fundPrincipalAsOf(item, asOfDate){
+  return item.contributionAmount * fundPeriodsAsOf(item, asOfDate);
+}
+function getSpouseSupportTotal(monthKey){
+  return state.spouseSupport
+    .filter(s => s.date.slice(0,7) === monthKey)
+    .reduce((sum, s) => sum + s.amount, 0);
+}
 
 function getEffectiveBudget(item, monthKey){
   const overrides = Object.keys(state.transferBudgets)
@@ -200,7 +287,7 @@ function switchTab(tab){
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById('screen-' + tab).classList.add('active');
   document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  document.getElementById('addBtn').style.display = tab === 'home' ? 'none' : 'flex';
+  document.getElementById('addBtn').style.display = (tab === 'home' || tab === 'deposits' || tab === 'debts') ? 'none' : 'flex';
   render();
 }
 document.querySelectorAll('.tabbar button').forEach(b => {
@@ -209,9 +296,24 @@ document.querySelectorAll('.tabbar button').forEach(b => {
 document.getElementById('addBtn').addEventListener('click', () => {
   if(currentTab === 'transfer') openTransferModal(null);
   else if(currentTab === 'cards') openCardModal(null);
-  else if(currentTab === 'deposits') openDepositModal(null);
 });
 function closeModal(){ document.getElementById('modalOverlay').classList.remove('open'); }
+let pendingDelete = null;
+function confirmDelete(message, action){
+  pendingDelete = action;
+  const modal = document.getElementById('modalContent');
+  modal.innerHTML = `
+    <p style="font-size:15px;line-height:1.6;margin:4px 0 20px;">${message}</p>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" style="background:var(--danger);" onclick="executePendingDelete()">삭제</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function executePendingDelete(){
+  if(pendingDelete) pendingDelete();
+  pendingDelete = null;
+}
 document.getElementById('modalOverlay').addEventListener('click', e => {
   if(e.target.id === 'modalOverlay') closeModal();
 });
@@ -228,8 +330,8 @@ function renderHome(){
 
   const today = new Date(); today.setHours(0,0,0,0);
   const soonDeposits = state.deposits.filter(d => {
-    if(d.matured || !d.term) return false;
-    const maturity = addMonthsToDate(d.startDate, d.term);
+    if(d.matured || !d.maturityDate || (d.type !== '적금' && d.type !== '예금')) return false;
+    const maturity = new Date(d.maturityDate + 'T00:00:00');
     const diff = daysBetween(today, maturity);
     return diff >= 0 && diff <= 14;
   });
@@ -265,7 +367,7 @@ function renderHome(){
     if(soonDeposits.length){
       html += `<div class="card">`;
       soonDeposits.forEach(d => {
-        const maturity = addMonthsToDate(d.startDate, d.term);
+        const maturity = new Date(d.maturityDate + 'T00:00:00');
         const diff = daysBetween(today, maturity);
         html += `<div class="row" onclick="switchTab('deposits')" style="cursor:pointer">
           <div class="info"><p class="title">${d.name} 만기 임박</p><p class="desc">D-${diff}</p></div>
@@ -288,6 +390,46 @@ function renderTransfer(){
   const pct = total ? Math.round(done / total * 100) : 0;
 
   let html = renderMonthNav();
+
+  const incomeVals = state.incomeMonthly[viewMonth] || {};
+  const incomeTotal = state.incomeSources.reduce((s,src) => s + (incomeVals[src.id] || 0), 0);
+  const spouseTotal = getSpouseSupportTotal(viewMonth);
+  const incomeGrand = incomeTotal + spouseTotal;
+  const remainder = incomeGrand - total;
+
+  html += `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0;">
+      <p style="font-size:13px;font-weight:500;margin:0;">이번달 수입</p>
+      <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;" onclick="openIncomeSourceModal(null)">+ 항목 추가</button>
+    </div>`;
+  state.incomeSources.forEach(src => {
+    const val = incomeVals[src.id] || 0;
+    html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:13px;">${src.name}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <input type="number" value="${val || ''}" placeholder="0" style="width:110px;text-align:right;padding:6px;border:1px solid var(--border);border-radius:6px;" onchange="updateIncomeAmount('${src.id}',this.value)">
+        <button class="iconbtn" onclick="openIncomeSourceModal('${src.id}')">✎</button>
+      </div>
+    </div>`;
+  });
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:13px;color:var(--text2);">배우자 지원 (부채현황 기록 합계)</span>
+      <span style="font-size:13px;">${formatWon(spouseTotal)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:14px;font-weight:500;">수입 합계</span>
+      <span style="font-size:14px;font-weight:500;">${formatWon(incomeGrand)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
+      <span style="font-size:13px;color:var(--text2);">이체 예산</span>
+      <span style="font-size:13px;">- ${formatWon(total)}</span>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0 4px;">
+      <span style="font-size:14px;font-weight:500;">이체하고 남는 돈</span>
+      <span style="font-size:16px;font-weight:500;color:${remainder < 0 ? 'var(--danger)' : 'var(--success)'};">${formatWon(remainder)}</span>
+    </div>
+  </div>`;
+
   html += `<div class="banner">
     <div style="display:flex;justify-content:space-between">
       <span>${formatWon(done)} / ${formatWon(total)} 완료</span><span>${pct}%</span>
@@ -312,6 +454,39 @@ function renderTransfer(){
   });
   html += `</div>`;
   el.innerHTML = html;
+}
+function updateIncomeAmount(sourceId, val){
+  if(!state.incomeMonthly[viewMonth]) state.incomeMonthly[viewMonth] = {};
+  state.incomeMonthly[viewMonth][sourceId] = parseInt(val, 10) || 0;
+  saveState(); render();
+}
+function openIncomeSourceModal(id){
+  const item = id ? state.incomeSources.find(s => s.id === id) : null;
+  const modal = document.getElementById('modalContent');
+  modal.innerHTML = `
+    <div class="field"><label>항목 이름</label><input id="f-iname" value="${item ? item.name : ''}" placeholder="예: 급여(2차)"></div>
+    <div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteIncomeSource('${id}')">삭제</button>` : ''}
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" onclick="saveIncomeSource(${item ? `'${id}'` : 'null'})">저장</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveIncomeSource(id){
+  const name = document.getElementById('f-iname').value.trim();
+  if(!name){ alert('항목 이름을 입력해줘'); return; }
+  if(id){
+    state.incomeSources.find(s => s.id === id).name = name;
+  } else {
+    state.incomeSources.push({ id: uid(), name });
+  }
+  saveState(); closeModal(); render();
+}
+function deleteIncomeSource(id){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.incomeSources = state.incomeSources.filter(s => s.id !== id);
+    saveState(); closeModal(); render();
+  });
 }
 function toggleTransfer(id){
   if(!state.transferChecks[viewMonth]) state.transferChecks[viewMonth] = {};
@@ -358,14 +533,15 @@ function saveTransfer(id){
   saveState(); closeModal(); render();
 }
 function deleteTransfer(id){
-  if(!confirm('삭제할까요? 이번 달부터 목록에서 빠지고, 이전 달 기록은 그대로 남아요.')) return;
-  const item = state.transfers.find(t => t.id === id);
-  if(item.createdMonth === viewMonth){
-    state.transfers = state.transfers.filter(t => t.id !== id);
-  } else {
-    item.endedMonth = viewMonth;
-  }
-  saveState(); closeModal(); render();
+  confirmDelete('삭제할까요? 이번 달부터 목록에서 빠지고, 이전 달 기록은 그대로 남아요.', () => {
+    const item = state.transfers.find(t => t.id === id);
+    if(item.createdMonth === viewMonth){
+      state.transfers = state.transfers.filter(t => t.id !== id);
+    } else {
+      item.endedMonth = viewMonth;
+    }
+    saveState(); closeModal(); render();
+  });
 }
 
 /* ---------- CARDS ---------- */
@@ -450,63 +626,151 @@ function saveCard(id){
   saveState(); closeModal(); render();
 }
 function deleteCard(id){
-  if(!confirm('삭제할까요?')) return;
-  state.cards = state.cards.filter(c => c.id !== id);
-  saveState(); closeModal(); render();
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.cards = state.cards.filter(c => c.id !== id);
+    saveState(); closeModal(); render();
+  });
 }
 
-/* ---------- DEPOSITS ---------- */
+/* ---------- DEPOSITS (저축현황) ---------- */
+function sectionHeader(label, type, opener){
+  opener = opener || 'openSavingsModal';
+  return `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 8px;">
+    <span style="font-size:13px;font-weight:500;">${label}</span>
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="${opener}('${type}', null)">+ 추가</button>
+  </div>`;
+}
+function renderSavingsRow(d, prog){
+  let html = `<div class="row" style="display:block">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span class="title">${d.name}${d.matured ? ' (완료)' : ''}</span>
+      <div>
+        <button class="iconbtn" onclick="openSavingsModal('${d.type}','${d.id}')">✎</button>
+        <button class="iconbtn" onclick="toggleMatured('${d.id}')">${d.matured ? '↺' : '✓'}</button>
+      </div>
+    </div>`;
+  if(prog.diff != null){
+    html += `<div class="progress ${prog.diff <= 0 ? 'done' : ''}"><div style="width:${prog.pct}%"></div></div>`;
+  }
+  const maturityLabel = d.maturityDate ? (prog.diff >= 0 ? `D-${prog.diff}` : '만기 지남') : '만기 없음';
+  if(d.type === '적금'){
+    html += `<p class="desc">월 ${formatWon(d.monthlyAmount)} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
+  } else {
+    html += `<p class="desc">가입 ${formatWon(d.principalAmount)} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
+  }
+  if(d.memo) html += `<p class="desc">${d.memo}</p>`;
+  html += `<div style="background:var(--bg);border-radius:8px;padding:8px 10px;margin-top:6px;">`;
+  if(d.type === '적금'){
+    html += `<p style="font-size:13px;font-weight:500;margin:0;">지금까지 ${formatWon(Math.round(prog.principal))} 납입</p>`;
+  }
+  html += `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">세전 예상 총액 약 ${formatWon(Math.round(prog.total))} (이자 약 ${formatWon(Math.round(prog.interest))} 추정)</p>`;
+  html += `</div></div>`;
+  return html;
+}
+function renderFundRow(d){
+  const today = new Date(); today.setHours(0,0,0,0);
+  const principal = fundPrincipalAsOf(d, today);
+  let html = `<div class="row" style="display:block">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span class="title">${d.name}${d.matured ? ' (완료)' : ''}</span>
+      <div>
+        <button class="iconbtn" onclick="openSavingsModal('펀드연금','${d.id}')">✎</button>
+        <button class="iconbtn" onclick="toggleMatured('${d.id}')">${d.matured ? '↺' : '✓'}</button>
+      </div>
+    </div>
+    <p class="desc">${d.frequency} ${formatWon(d.contributionAmount)} · ${d.openDate} 시작 · 누적 납입 ${formatWon(Math.round(principal))}</p>`;
+  if(d.memo) html += `<p class="desc">${d.memo}</p>`;
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
+    <span class="desc" style="margin:0">평가금액 기록</span>
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 8px;" onclick="openValuationModal('${d.id}')">+ 기록추가</button>
+  </div>`;
+  const vlist = (d.valuations || []).slice().sort((a,b) => b.date.localeCompare(a.date));
+  if(vlist.length){
+    html += `<div style="background:var(--bg);border-radius:8px;padding:2px 10px;margin-top:6px;">`;
+    vlist.forEach((v,i) => {
+      const asOf = new Date(v.date + 'T00:00:00');
+      const gain = v.amount - fundPrincipalAsOf(d, asOf);
+      const sign = gain >= 0 ? '+' : '';
+      html += `<div style="display:flex;justify-content:space-between;padding:8px 0;${i < vlist.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
+        <span style="font-size:13px;">${v.date}</span>
+        <span style="font-size:13px;">${formatWon(v.amount)}</span>
+        <span style="font-size:12px;color:var(--accent);">${sign}${formatWon(gain)}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+  html += `</div>`;
+  return html;
+}
+function renderCompletedRow(d){
+  let info = '';
+  if(d.type === '적금') info = `월 ${formatWon(d.monthlyAmount)} · ${d.openDate} ~ ${d.maturityDate || '만기 없음'}`;
+  else if(d.type === '예금') info = `가입 ${formatWon(d.principalAmount)} · ${d.openDate} ~ ${d.maturityDate || '만기 없음'}`;
+  else info = `${d.frequency} ${formatWon(d.contributionAmount)} · ${d.openDate}부터`;
+  return `<div class="row">
+    <div class="info">
+      <p class="title">${d.name} <span style="font-size:11px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 6px;margin-left:4px;">${d.type}</span></p>
+      <p class="desc">${info}</p>
+    </div>
+    <button class="iconbtn" onclick="openSavingsModal('${d.type}','${d.id}')">✎</button>
+    <button class="iconbtn" onclick="toggleMatured('${d.id}')">↺</button>
+  </div>`;
+}
 function renderDeposits(){
   const el = document.getElementById('screen-deposits');
-  const today = new Date(); today.setHours(0,0,0,0);
 
-  const items = state.deposits.map(d => {
-    let maturity = null, diff = null, pct = null;
-    if(d.term){
-      maturity = addMonthsToDate(d.startDate, d.term);
-      diff = daysBetween(today, maturity);
-      const start = new Date(d.startDate + 'T00:00:00');
-      const totalDays = daysBetween(start, maturity) || 1;
-      const elapsed = daysBetween(start, today);
-      pct = Math.max(0, Math.min(100, Math.round(elapsed / totalDays * 100)));
-    }
-    return Object.assign({}, d, { maturity, diff, pct });
-  }).sort((a,b) => {
-    if(a.matured !== b.matured) return a.matured ? 1 : -1;
-    if(a.diff == null && b.diff == null) return 0;
-    if(a.diff == null) return 1;
-    if(b.diff == null) return -1;
-    return a.diff - b.diff;
-  });
+  const savingsAll = state.deposits.filter(d => d.type === '적금').map(d => ({ item: d, prog: savingsProgress(d) }));
+  const depositsAll = state.deposits.filter(d => d.type === '예금').map(d => ({ item: d, prog: depositProgress(d) }));
+  const fundsAll = state.deposits.filter(d => d.type === '펀드연금');
+
+  const savings = savingsAll.filter(x => !x.item.matured);
+  const deposits = depositsAll.filter(x => !x.item.matured);
+  const funds = fundsAll.filter(d => !d.matured);
+  const completed = savingsAll.filter(x => x.item.matured).map(x => x.item)
+    .concat(depositsAll.filter(x => x.item.matured).map(x => x.item))
+    .concat(fundsAll.filter(d => d.matured));
+
+  const sortFn = (a,b) => {
+    const da = a.prog.diff, db = b.prog.diff;
+    if(da == null && db == null) return 0;
+    if(da == null) return 1;
+    if(db == null) return -1;
+    return da - db;
+  };
+  savings.sort(sortFn);
+  deposits.sort(sortFn);
 
   let html = '';
-  const nearest = items.find(d => !d.matured && d.diff != null);
-  if(nearest){
+  const allDated = savings.concat(deposits).filter(x => x.prog.diff != null);
+  if(allDated.length){
+    const nearest = allDated.reduce((a,b) => a.prog.diff <= b.prog.diff ? a : b);
     html += `<div class="banner">
       <div style="display:flex;justify-content:space-between">
-        <span>가장 가까운 만기 · ${nearest.name}</span><span>D-${nearest.diff}</span>
+        <span>가장 가까운 만기 · ${nearest.item.name}</span><span>D-${nearest.prog.diff}</span>
       </div>
     </div>`;
   }
+
+  html += sectionHeader('적금', '적금');
   html += `<div class="card">`;
-  items.forEach(d => {
-    html += `<div class="row" style="display:block">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <span class="title">${d.name}${d.matured ? ' (완료)' : ''}</span>
-        <div>
-          <button class="iconbtn" onclick="openDepositModal('${d.id}')">✎</button>
-          <button class="iconbtn" onclick="toggleMatured('${d.id}')">${d.matured ? '↺' : '✓'}</button>
-        </div>
-      </div>`;
-    if(d.term){
-      html += `<div class="progress ${d.diff <= 0 ? 'done' : ''}"><div style="width:${d.pct}%"></div></div>`;
-    }
-    const label = d.term ? (d.diff >= 0 ? `D-${d.diff}` : '만기 지남') : '진행중';
-    html += `<p class="desc">${d.amountLabel} · ${d.startDate} 시작${d.term ? ' · ' + d.term + '개월 · ' + label : ' · 만기 없음'}</p>`;
-    if(d.memo) html += `<p class="desc">${d.memo}</p>`;
-    html += `</div>`;
-  });
+  html += savings.length ? savings.map(({item,prog}) => renderSavingsRow(item, prog)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 적금이 없어요</p>`;
   html += `</div>`;
+
+  html += sectionHeader('예금', '예금');
+  html += `<div class="card">`;
+  html += deposits.length ? deposits.map(({item,prog}) => renderSavingsRow(item, prog)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 예금이 없어요</p>`;
+  html += `</div>`;
+
+  html += sectionHeader('펀드·연금', '펀드연금');
+  html += `<div class="card">`;
+  html += funds.length ? funds.map(item => renderFundRow(item)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 펀드·연금이 없어요</p>`;
+  html += `</div>`;
+
+  html += `<p style="font-size:13px;font-weight:500;margin:0 0 8px;">완료</p>`;
+  html += `<div class="card">`;
+  html += completed.length ? completed.map(d => renderCompletedRow(d)).join('') : `<p class="desc" style="padding:12px 0">완료된 항목이 없어요</p>`;
+  html += `</div>`;
+
   el.innerHTML = html;
 }
 function toggleMatured(id){
@@ -514,46 +778,298 @@ function toggleMatured(id){
   item.matured = !item.matured;
   saveState(); render();
 }
-function openDepositModal(id){
+function openSavingsModal(type, id){
   const item = id ? state.deposits.find(d => d.id === id) : null;
   const modal = document.getElementById('modalContent');
-  modal.innerHTML = `
-    <div class="field"><label>이름</label><input id="f-name" value="${item ? item.name : ''}"></div>
-    <div class="field"><label>금액 표시 (자유 텍스트)</label><input id="f-amountlabel" value="${item ? item.amountLabel : ''}"></div>
-    <div class="field"><label>시작일</label><input id="f-start" type="date" value="${item ? item.startDate : ''}"></div>
-    <div class="field"><label>기간(개월, 만기 없으면 비워두기)</label><input id="f-term" type="number" value="${item && item.term ? item.term : ''}"></div>
-    <div class="field"><label>메모</label><input id="f-memo" value="${item ? item.memo : ''}"></div>
-    <div class="modal-actions">
-      ${item ? `<button class="btn btn-danger" onclick="deleteDeposit('${id}')">삭제</button>` : ''}
+  let fields = `<div class="field"><label>이름</label><input id="f-name" value="${item ? item.name : ''}"></div>`;
+  if(type === '적금'){
+    fields += `
+      <div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>
+      <div class="field"><label>만기일 (없으면 비워두기)</label><input id="f-maturity" type="date" value="${item && item.maturityDate ? item.maturityDate : ''}"></div>
+      <div class="field"><label>월납입금액</label><input id="f-monthly" type="number" value="${item ? item.monthlyAmount : ''}"></div>
+      <div class="field"><label>약정이율(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>`;
+  } else if(type === '예금'){
+    fields += `
+      <div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>
+      <div class="field"><label>만기일 (없으면 비워두기)</label><input id="f-maturity" type="date" value="${item && item.maturityDate ? item.maturityDate : ''}"></div>
+      <div class="field"><label>가입금액</label><input id="f-principal" type="number" value="${item ? item.principalAmount : ''}"></div>
+      <div class="field"><label>약정이율(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>`;
+  } else {
+    fields += `
+      <div class="field"><label>납입주기</label>
+        <select id="f-frequency" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+          <option value="월" ${item && item.frequency === '월' ? 'selected' : ''}>월</option>
+          <option value="주" ${item && item.frequency === '주' ? 'selected' : ''}>주</option>
+        </select>
+      </div>
+      <div class="field"><label>납입금액</label><input id="f-contribution" type="number" value="${item ? item.contributionAmount : ''}"></div>
+      <div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>`;
+  }
+  fields += `<div class="field"><label>메모</label><input id="f-memo" value="${item ? item.memo : ''}"></div>`;
+  fields += `<div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteSavings('${id}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="saveDeposit(${item ? `'${id}'` : 'null'})">저장</button>
+      <button class="btn btn-primary" onclick="saveSavings('${type}', ${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
+  modal.innerHTML = fields;
   document.getElementById('modalOverlay').classList.add('open');
 }
-function saveDeposit(id){
+function saveSavings(type, id){
   const name = document.getElementById('f-name').value.trim();
-  const amountLabel = document.getElementById('f-amountlabel').value.trim();
-  const startDate = document.getElementById('f-start').value;
-  const termRaw = document.getElementById('f-term').value;
-  const term = termRaw ? (parseInt(termRaw, 10) || null) : null;
   const memo = document.getElementById('f-memo').value.trim();
-  if(!name || !startDate){ alert('이름과 시작일은 필수야'); return; }
+  if(!name){ alert('이름을 입력해줘'); return; }
+
+  const data = { name, memo };
+  const openDate = document.getElementById('f-open').value;
+  if(!openDate){ alert('개설일은 필수야'); return; }
+  data.openDate = openDate;
+
+  if(type === '적금'){
+    data.maturityDate = document.getElementById('f-maturity').value || null;
+    data.monthlyAmount = parseInt(document.getElementById('f-monthly').value, 10) || 0;
+    data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
+  } else if(type === '예금'){
+    data.maturityDate = document.getElementById('f-maturity').value || null;
+    data.principalAmount = parseInt(document.getElementById('f-principal').value, 10) || 0;
+    data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
+  } else {
+    data.frequency = document.getElementById('f-frequency').value;
+    data.contributionAmount = parseInt(document.getElementById('f-contribution').value, 10) || 0;
+  }
+
   if(id){
     const item = state.deposits.find(d => d.id === id);
-    item.name = name; item.amountLabel = amountLabel; item.startDate = startDate; item.term = term; item.memo = memo;
+    Object.assign(item, data);
   } else {
-    state.deposits.push({ id: uid(), name, amountLabel, startDate, term, memo, matured: false });
+    data.type = type;
+    data.matured = false;
+    if(type === '펀드연금') data.valuations = [];
+    data.id = uid();
+    state.deposits.push(data);
   }
   saveState(); closeModal(); render();
 }
-function deleteDeposit(id){
-  if(!confirm('삭제할까요?')) return;
-  state.deposits = state.deposits.filter(d => d.id !== id);
+function deleteSavings(id){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.deposits = state.deposits.filter(d => d.id !== id);
+    saveState(); closeModal(); render();
+  });
+}
+function openValuationModal(id){
+  const modal = document.getElementById('modalContent');
+  const todayStr = new Date().toISOString().slice(0,10);
+  modal.innerHTML = `
+    <div class="field"><label>확인일</label><input id="f-vdate" type="date" value="${todayStr}"></div>
+    <div class="field"><label>평가금액</label><input id="f-vamount" type="number"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" onclick="saveValuation('${id}')">저장</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveValuation(id){
+  const date = document.getElementById('f-vdate').value;
+  const amountRaw = document.getElementById('f-vamount').value;
+  if(!date || amountRaw === ''){ alert('날짜와 금액을 입력해줘'); return; }
+  const item = state.deposits.find(d => d.id === id);
+  if(!item.valuations) item.valuations = [];
+  item.valuations.push({ date, amount: parseInt(amountRaw, 10) || 0 });
   saveState(); closeModal(); render();
 }
 
+/* ---------- DEBTS (부채현황) ---------- */
+function renderDebtRow(d){
+  let html = `<div class="row" style="display:block">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+      <span class="title">${d.name}</span>
+      <span style="font-size:11px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 6px;">상환 ${d.payer}</span>
+    </div>`;
+  if(d.type === '고정대출'){
+    html += `<p class="desc">원금 ${formatWon(d.principal)} · 금리 ${d.interestRate || 0}% · ${d.startDate} 실행 · ${d.maturityDate || '만기 미정'} 만기 · ${d.repaymentType}</p>`;
+  } else {
+    html += `<p class="desc">한도 ${formatWon(d.limit)} · 금리 ${d.interestRate || 0}% · ${d.startDate} 개설</p>`;
+  }
+  if(d.memo) html += `<p class="desc">${d.memo}</p>`;
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
+    <span class="desc" style="margin:0">잔액 기록</span>
+    <div>
+      <button class="iconbtn" onclick="openDebtModal('${d.type}','${d.id}')">✎</button>
+      <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;" onclick="openBalanceLogModal('${d.id}')">+ 기록추가</button>
+    </div>
+  </div>`;
+  const logs = (d.balanceLog || []).slice().sort((a,b) => b.date.localeCompare(a.date));
+  if(logs.length){
+    html += `<p class="desc" style="margin-top:4px;">최근 ${logs[0].date} · ${formatWon(logs[0].amount)}</p>`;
+  }
+  html += `</div>`;
+  return html;
+}
+function renderDebts(){
+  const el = document.getElementById('screen-debts');
+  const fixed = state.debts.filter(d => d.type === '고정대출');
+  const limit = state.debts.filter(d => d.type === '한도대출');
+
+  let html = sectionHeader('고정대출', '고정대출', 'openDebtModal');
+  html += `<div class="card">`;
+  html += fixed.length ? fixed.map(renderDebtRow).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 고정대출이 없어요</p>`;
+  html += `</div>`;
+
+  html += sectionHeader('한도대출', '한도대출', 'openDebtModal');
+  html += `<div class="card">`;
+  html += limit.length ? limit.map(renderDebtRow).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 한도대출이 없어요</p>`;
+  html += `</div>`;
+
+  const thisMonth = getMonthKey(new Date());
+  const spouseTotal = getSpouseSupportTotal(thisMonth);
+  html += `<div style="display:flex;justify-content:space-between;align-items:center;margin:0 0 8px;">
+    <span style="font-size:13px;font-weight:500;">배우자 지원금</span>
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="openSpouseSupportModal(null)">+ 기록추가</button>
+  </div>`;
+  html += `<div class="banner"><div style="display:flex;justify-content:space-between">
+    <span>이번달 받은 금액</span><span>${formatWon(spouseTotal)}</span>
+  </div></div>`;
+  const supportList = state.spouseSupport.slice().sort((a,b) => b.date.localeCompare(a.date));
+  html += `<div class="card">`;
+  if(supportList.length){
+    html += supportList.map(s => `<div class="row">
+      <div class="info">
+        <p class="title">${s.date}</p>
+        ${s.memo ? `<p class="desc">${s.memo}</p>` : ''}
+      </div>
+      <span class="amt">${formatWon(s.amount)}</span>
+      <button class="iconbtn" onclick="deleteSpouseSupport('${s.id}')">✕</button>
+    </div>`).join('');
+  } else {
+    html += `<p class="desc" style="padding:12px 0">아직 기록이 없어요</p>`;
+  }
+  html += `</div>`;
+
+  el.innerHTML = html;
+}
+function openSpouseSupportModal(id){
+  const modal = document.getElementById('modalContent');
+  const todayStr = new Date().toISOString().slice(0,10);
+  modal.innerHTML = `
+    <div class="field"><label>날짜</label><input id="f-sdate" type="date" value="${todayStr}"></div>
+    <div class="field"><label>금액</label><input id="f-samount" type="number"></div>
+    <div class="field"><label>용도 (메모)</label><input id="f-smemo" placeholder="예: 전세자금대출 이자"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" onclick="saveSpouseSupport()">저장</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveSpouseSupport(){
+  const date = document.getElementById('f-sdate').value;
+  const amountRaw = document.getElementById('f-samount').value;
+  const memo = document.getElementById('f-smemo').value.trim();
+  if(!date || amountRaw === ''){ alert('날짜와 금액을 입력해줘'); return; }
+  state.spouseSupport.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0, memo });
+  saveState(); closeModal(); render();
+}
+function deleteSpouseSupport(id){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.spouseSupport = state.spouseSupport.filter(s => s.id !== id);
+    saveState(); closeModal(); render();
+  });
+}
+function openDebtModal(type, id){
+  const item = id ? state.debts.find(d => d.id === id) : null;
+  const modal = document.getElementById('modalContent');
+  let fields = `<div class="field"><label>이름</label><input id="f-name" value="${item ? item.name : ''}"></div>`;
+  if(type === '고정대출'){
+    fields += `
+      <div class="field"><label>원금</label><input id="f-principal" type="number" value="${item ? item.principal : ''}"></div>
+      <div class="field"><label>실행일</label><input id="f-open" type="date" value="${item ? item.startDate : ''}"></div>
+      <div class="field"><label>금리(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>
+      <div class="field"><label>만기일 (없으면 비워두기)</label><input id="f-maturity" type="date" value="${item && item.maturityDate ? item.maturityDate : ''}"></div>
+      <div class="field"><label>상환방식</label>
+        <select id="f-repayment" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+          <option value="원금+이자 상환" ${item && item.repaymentType === '원금+이자 상환' ? 'selected' : ''}>원금+이자 상환</option>
+          <option value="이자만 납부" ${item && item.repaymentType === '이자만 납부' ? 'selected' : ''}>이자만 납부</option>
+        </select>
+      </div>`;
+  } else {
+    fields += `
+      <div class="field"><label>한도</label><input id="f-limit" type="number" value="${item ? item.limit : ''}"></div>
+      <div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.startDate : ''}"></div>
+      <div class="field"><label>금리(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>`;
+  }
+  fields += `
+    <div class="field"><label>상환자</label>
+      <select id="f-payer" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+        <option value="본인" ${item && item.payer === '본인' ? 'selected' : ''}>본인</option>
+        <option value="배우자" ${item && item.payer === '배우자' ? 'selected' : ''}>배우자</option>
+      </select>
+    </div>
+    <div class="field"><label>메모</label><input id="f-memo" value="${item ? item.memo : ''}"></div>
+    <div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteDebt('${id}')">삭제</button>` : ''}
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" onclick="saveDebt('${type}', ${item ? `'${id}'` : 'null'})">저장</button>
+    </div>`;
+  modal.innerHTML = fields;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveDebt(type, id){
+  const name = document.getElementById('f-name').value.trim();
+  const openDate = document.getElementById('f-open').value;
+  const memo = document.getElementById('f-memo').value.trim();
+  const payer = document.getElementById('f-payer').value;
+  if(!name || !openDate){ alert('이름과 날짜는 필수야'); return; }
+
+  const data = { name, startDate: openDate, memo, payer };
+  data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
+  if(type === '고정대출'){
+    data.principal = parseInt(document.getElementById('f-principal').value, 10) || 0;
+    data.maturityDate = document.getElementById('f-maturity').value || null;
+    data.repaymentType = document.getElementById('f-repayment').value;
+  } else {
+    data.limit = parseInt(document.getElementById('f-limit').value, 10) || 0;
+  }
+
+  if(id){
+    const item = state.debts.find(d => d.id === id);
+    Object.assign(item, data);
+  } else {
+    data.type = type;
+    data.id = uid();
+    data.balanceLog = [];
+    state.debts.push(data);
+  }
+  saveState(); closeModal(); render();
+}
+function deleteDebt(id){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state.debts = state.debts.filter(d => d.id !== id);
+    saveState(); closeModal(); render();
+  });
+}
+function openBalanceLogModal(id){
+  const modal = document.getElementById('modalContent');
+  const todayStr = new Date().toISOString().slice(0,10);
+  modal.innerHTML = `
+    <div class="field"><label>확인일</label><input id="f-bdate" type="date" value="${todayStr}"></div>
+    <div class="field"><label>잔액</label><input id="f-bamount" type="number"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" onclick="saveBalanceLog('${id}')">저장</button>
+    </div>`;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+function saveBalanceLog(id){
+  const date = document.getElementById('f-bdate').value;
+  const amountRaw = document.getElementById('f-bamount').value;
+  if(!date || amountRaw === ''){ alert('날짜와 잔액을 입력해줘'); return; }
+  const item = state.debts.find(d => d.id === id);
+  if(!item.balanceLog) item.balanceLog = [];
+  item.balanceLog.push({ date, amount: parseInt(amountRaw, 10) || 0 });
+  saveState(); closeModal(); render();
+}
+
+
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v7';
+const APP_VERSION = 'v14';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
@@ -564,6 +1080,7 @@ function render(){
   renderTransfer();
   renderCards();
   renderDeposits();
+  renderDebts();
 }
 render();
 
