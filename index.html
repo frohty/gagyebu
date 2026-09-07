@@ -185,6 +185,13 @@ function migrateState(s){
   });
   if(!s.debts) s.debts = [];
   (s.deposits || []).forEach(d => {
+    (d.valuations || []).forEach(v => { if(!v.id) v.id = uid(); });
+    (d.paymentLog || []).forEach(p => { if(!p.id) p.id = uid(); });
+  });
+  (s.debts || []).forEach(d => {
+    (d.balanceLog || []).forEach(l => { if(!l.id) l.id = uid(); });
+  });
+  (s.deposits || []).forEach(d => {
     if(d.type === '적금' && !d.mode){
       d.mode = '정기';
       if(d.payDay === undefined) d.payDay = null;
@@ -299,14 +306,15 @@ function savingsProgress(item){
   const today = new Date(); today.setHours(0,0,0,0);
   const maturity = item.maturityDate ? new Date(item.maturityDate + 'T00:00:00') : null;
   const capToday = (maturity && maturity < today) ? maturity : today;
-  const elapsedPeriods = countPeriodsMonthly(item.openDate, item.payDay, capToday);
+  const n = countPeriodsMonthly(item.openDate, item.payDay, capToday);
   const totalPeriods = maturity ? countPeriodsMonthly(item.openDate, item.payDay, maturity) : null;
-  const principal = item.monthlyAmount * elapsedPeriods;
+  const initialAmt = (item.initialAmount != null && item.initialAmount !== '') ? item.initialAmount : item.monthlyAmount;
+  const principal = n > 0 ? initialAmt + Math.max(0, n - 1) * item.monthlyAmount : 0;
   const rate = (item.interestRate || 0) / 100;
-  const interest = item.monthlyAmount * rate * (elapsedPeriods * (elapsedPeriods + 1)) / (2 * 12);
+  const interest = n > 0 ? initialAmt * (rate / 12) * n + item.monthlyAmount * (rate / 12) * ((n - 1) * n / 2) : 0;
   const diff = maturity ? daysBetween(today, maturity) : null;
-  const pct = totalPeriods ? Math.min(100, Math.round(elapsedPeriods / totalPeriods * 100)) : 0;
-  return { elapsedPeriods, totalPeriods, principal, interest, total: principal + interest, diff, pct };
+  const pct = totalPeriods ? Math.min(100, Math.round(n / totalPeriods * 100)) : 0;
+  return { elapsedPeriods: n, totalPeriods, principal, interest, total: principal + interest, diff, pct };
 }
 function freeSavingsProgress(item){
   const today = new Date(); today.setHours(0,0,0,0);
@@ -1115,7 +1123,7 @@ function renderSavingsRow(d, prog){
     return html;
   }
   if(d.type === '적금'){
-    html += `<p class="desc">월 ${formatWon(d.monthlyAmount)}${d.payDay ? ' · 매월 ' + d.payDay + '일' : ''} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
+    html += `<p class="desc">${d.initialAmount != null && d.initialAmount !== d.monthlyAmount ? '최초 ' + formatWon(d.initialAmount) + ' · ' : ''}월 ${formatWon(d.monthlyAmount)}${d.payDay ? ' · 매월 ' + d.payDay + '일' : ''} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
   } else {
     html += `<p class="desc">가입 ${formatWon(d.principalAmount)} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
   }
@@ -1259,14 +1267,15 @@ function openSavingsModal(type, id, override){
     const mode = override || (item ? item.mode : '정기');
     fields += `<div class="field"><label>적금 방식</label>
       <select id="f-mode" onchange="openSavingsModal('적금', ${id ? `'${id}'` : 'null'}, this.value)" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
-        <option value="정기" ${mode === '정기' ? 'selected' : ''}>정기적금</option>
-        <option value="자유" ${mode === '자유' ? 'selected' : ''}>자유적금</option>
+        <option value="정기" ${mode === '정기' ? 'selected' : ''}>정기적금 (매달 같은 금액 자동계산)</option>
+        <option value="자유" ${mode === '자유' ? 'selected' : ''}>자유적금 (매번 직접 기록)</option>
       </select>
     </div>`;
     fields += `<div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>
       <div class="field"><label>만기일 (없으면 비워두기)</label><input id="f-maturity" type="date" value="${item && item.maturityDate ? item.maturityDate : ''}"></div>`;
     if(mode === '정기'){
-      fields += `<div class="field"><label>월납입금액</label><input id="f-monthly" type="number" value="${item ? item.monthlyAmount : ''}"></div>
+      fields += `<div class="field"><label>최초 납입금액 (선택, 안 넣으면 월납입금액과 동일)</label><input id="f-initial" type="number" value="${item && item.initialAmount != null ? item.initialAmount : ''}"></div>
+        <div class="field"><label>월납입금액 (2회차부터)</label><input id="f-monthly" type="number" value="${item ? item.monthlyAmount : ''}"></div>
         <div class="field"><label>납입일 (1~31, 없으면 개설일과 같은 날)</label><input id="f-payday" type="number" min="1" max="31" value="${item && item.payDay ? item.payDay : ''}"></div>
         <div class="field"><label>약정이율(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>`;
     } else {
@@ -1326,6 +1335,8 @@ function saveSavings(type, id){
     data.openDate = openDate;
     data.maturityDate = document.getElementById('f-maturity').value || null;
     if(mode === '정기'){
+      const initialRaw = document.getElementById('f-initial').value;
+      data.initialAmount = initialRaw !== '' ? (parseInt(initialRaw, 10) || 0) : null;
       data.monthlyAmount = parseInt(document.getElementById('f-monthly').value, 10) || 0;
       data.payDay = parseInt(document.getElementById('f-payday').value, 10) || null;
       data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
@@ -1706,7 +1717,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v26';
+const APP_VERSION = 'v28';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
