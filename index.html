@@ -135,7 +135,7 @@ function defaultData(){
     cardTierAmounts: {},
     deposits: [],
     debts: [],
-    incomeLog: [],
+    incomeLog: {},
     incomeSources: [],
     incomeMonthly: {}
   };
@@ -184,7 +184,28 @@ function migrateState(s){
     }
   });
   if(!s.debts) s.debts = [];
-  if(!s.incomeLog) s.incomeLog = [];
+  (s.deposits || []).forEach(d => {
+    if(d.type === '적금' && !d.mode){
+      d.mode = '정기';
+      if(d.payDay === undefined) d.payDay = null;
+    }
+    if(d.type === '펀드연금'){
+      if(d.payDay === undefined) d.payDay = null;
+      if((d.frequency === '비정기' || d.mode === '자유') && !d.paymentLog) d.paymentLog = [];
+    }
+    if(d.mode === '자유' && !d.paymentLog) d.paymentLog = [];
+  });
+  if(Array.isArray(s.incomeLog)){
+    const bucketed = {};
+    s.incomeLog.forEach(entry => {
+      const mk = entry.date.slice(0,7);
+      if(!bucketed[mk]) bucketed[mk] = [];
+      bucketed[mk].push(entry);
+    });
+    s.incomeLog = bucketed;
+  } else if(!s.incomeLog){
+    s.incomeLog = {};
+  }
   if(!s.incomeSources) s.incomeSources = [];
   if(!s.incomeMonthly) s.incomeMonthly = {};
   if(s.salaryMonthly && Object.keys(s.salaryMonthly).length && !s.incomeSources.some(x => x.name === '급여')){
@@ -252,20 +273,54 @@ function monthsBetween(d1, d2){
   if(d2.getDate() < d1.getDate()) months -= 1;
   return Math.max(0, months);
 }
-
+function countPeriodsMonthly(openDateStr, payDay, asOfDate){
+  const open = new Date(openDateStr + 'T00:00:00');
+  if(asOfDate < open) return 0;
+  const day = payDay || open.getDate();
+  let periods = 1;
+  let next = new Date(open.getFullYear(), open.getMonth(), day);
+  if(day <= open.getDate()) next.setMonth(next.getMonth() + 1);
+  while(next <= asOfDate){
+    periods++;
+    next.setMonth(next.getMonth() + 1);
+  }
+  return periods;
+}
+function countPeriodsWeekly(openDateStr, asOfDate){
+  const open = new Date(openDateStr + 'T00:00:00');
+  const days = daysBetween(open, asOfDate);
+  if(days < 0) return 0;
+  return Math.floor(days / 7) + 1;
+}
+function sumLogUpTo(log, asOfDate){
+  return (log || []).filter(p => new Date(p.date + 'T00:00:00') <= asOfDate).reduce((s,p) => s + p.amount, 0);
+}
 function savingsProgress(item){
-  const open = new Date(item.openDate + 'T00:00:00');
   const today = new Date(); today.setHours(0,0,0,0);
   const maturity = item.maturityDate ? new Date(item.maturityDate + 'T00:00:00') : null;
-  const totalMonths = maturity ? monthsBetween(open, maturity) : null;
-  let elapsedMonths = monthsBetween(open, today);
-  if(totalMonths != null) elapsedMonths = Math.min(elapsedMonths, totalMonths);
-  const principal = item.monthlyAmount * elapsedMonths;
+  const capToday = (maturity && maturity < today) ? maturity : today;
+  const elapsedPeriods = countPeriodsMonthly(item.openDate, item.payDay, capToday);
+  const totalPeriods = maturity ? countPeriodsMonthly(item.openDate, item.payDay, maturity) : null;
+  const principal = item.monthlyAmount * elapsedPeriods;
   const rate = (item.interestRate || 0) / 100;
-  const interest = item.monthlyAmount * rate * (elapsedMonths * (elapsedMonths + 1)) / (2 * 12);
+  const interest = item.monthlyAmount * rate * (elapsedPeriods * (elapsedPeriods + 1)) / (2 * 12);
   const diff = maturity ? daysBetween(today, maturity) : null;
-  const pct = totalMonths ? Math.min(100, Math.round(elapsedMonths / totalMonths * 100)) : 0;
-  return { elapsedMonths, totalMonths, principal, interest, total: principal + interest, diff, pct };
+  const pct = totalPeriods ? Math.min(100, Math.round(elapsedPeriods / totalPeriods * 100)) : 0;
+  return { elapsedPeriods, totalPeriods, principal, interest, total: principal + interest, diff, pct };
+}
+function freeSavingsProgress(item){
+  const today = new Date(); today.setHours(0,0,0,0);
+  const maturity = item.maturityDate ? new Date(item.maturityDate + 'T00:00:00') : null;
+  const principal = (item.paymentLog || []).reduce((s,p) => s + p.amount, 0);
+  const diff = maturity ? daysBetween(today, maturity) : null;
+  let pct = 0;
+  if(maturity){
+    const open = new Date(item.openDate + 'T00:00:00');
+    const totalDays = daysBetween(open, maturity) || 1;
+    const elapsedDays = Math.max(0, Math.min(daysBetween(open, today), totalDays));
+    pct = Math.round(elapsedDays / totalDays * 100);
+  }
+  return { principal, diff, pct };
 }
 function depositProgress(item){
   const open = new Date(item.openDate + 'T00:00:00');
@@ -280,18 +335,14 @@ function depositProgress(item){
   const pct = totalDays ? Math.min(100, Math.round(elapsedDays / totalDays * 100)) : 0;
   return { principal: item.principalAmount, interest, total: item.principalAmount + interest, diff, pct };
 }
-function fundPeriodsAsOf(item, asOfDate){
-  const open = new Date(item.openDate + 'T00:00:00');
-  let periods = item.frequency === '주' ? Math.floor(daysBetween(open, asOfDate) / 7) : monthsBetween(open, asOfDate);
-  return Math.max(0, periods);
-}
 function fundPrincipalAsOf(item, asOfDate){
-  return item.contributionAmount * fundPeriodsAsOf(item, asOfDate);
+  if(item.frequency === '월') return item.contributionAmount * countPeriodsMonthly(item.openDate, item.payDay, asOfDate);
+  if(item.frequency === '주') return item.contributionAmount * countPeriodsWeekly(item.openDate, asOfDate);
+  if(item.frequency === '없음') return item.initialAmount || 0;
+  return sumLogUpTo(item.paymentLog, asOfDate);
 }
 function getIncomeLogTotal(monthKey){
-  return state.incomeLog
-    .filter(s => s.date.slice(0,7) === monthKey)
-    .reduce((sum, s) => sum + s.amount, 0);
+  return (state.incomeLog[monthKey] || []).reduce((sum, s) => sum + s.amount, 0);
 }
 
 function getEffectiveBudget(item, monthKey){
@@ -381,7 +432,27 @@ document.getElementById('addBtn').addEventListener('click', () => {
   if(currentTab === 'transfer') openTransferModal(null);
   else if(currentTab === 'cards') openCardModal(null);
 });
-function closeModal(){ document.getElementById('modalOverlay').classList.remove('open'); }
+let modalHistoryPushed = false;
+function showModal(){
+  document.getElementById('modalOverlay').classList.add('open');
+  if(!modalHistoryPushed){
+    modalHistoryPushed = true;
+    history.pushState({ modal: true }, '');
+  }
+}
+function closeModal(){
+  document.getElementById('modalOverlay').classList.remove('open');
+  if(modalHistoryPushed){
+    modalHistoryPushed = false;
+    history.back();
+  }
+}
+window.addEventListener('popstate', () => {
+  if(document.getElementById('modalOverlay').classList.contains('open')){
+    document.getElementById('modalOverlay').classList.remove('open');
+    modalHistoryPushed = false;
+  }
+});
 let pendingDelete = null;
 function confirmDelete(message, action){
   pendingDelete = action;
@@ -392,7 +463,7 @@ function confirmDelete(message, action){
       <button class="btn" onclick="closeModal()">취소</button>
       <button class="btn btn-primary" style="background:var(--danger);" onclick="executePendingDelete()">삭제</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function executePendingDelete(){
   if(pendingDelete) pendingDelete();
@@ -558,22 +629,22 @@ function openIncomeManageModal(){
     <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="openIncomeSourceModal(null)">+ 항목 추가</button>
   </div>`;
 
-  html += `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">기타수입</p>`;
-  const logs = state.incomeLog.slice().sort((a,b) => b.date.localeCompare(a.date));
+  html += `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">기타수입 (${monthLabel(viewMonth)})</p>`;
+  const logs = (state.incomeLog[viewMonth] || []).slice().sort((a,b) => b.date.localeCompare(a.date));
   html += logs.length ? logs.map(s => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
-      <div><span style="font-size:13px;">${s.date}</span>${s.memo ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${s.memo}</p>` : ''}</div>
+      <div><span style="font-size:13px;">${s.date}</span>${s.memo ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;white-space:pre-wrap;">${s.memo}</p>` : ''}</div>
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="font-size:13px;">${formatWon(s.amount)}</span>
-        <button class="iconbtn" onclick="deleteIncomeLog('${s.id}')">✕</button>
+        <button class="iconbtn" onclick="openIncomeLogModal('${s.id}')">✎</button>
       </div>
     </div>`).join('') : `<p class="desc" style="padding:6px 0">아직 기록이 없어요</p>`;
   html += `<div style="text-align:right;margin-top:8px;">
-    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="openIncomeLogModal()">+ 기록추가</button>
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="openIncomeLogModal(null)">+ 기록추가</button>
   </div>`;
 
   html += `<div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button></div>`;
   modal.innerHTML = html;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function openIncomeSourceModal(id){
   const item = id ? state.incomeSources.find(s => s.id === id) : null;
@@ -585,7 +656,7 @@ function openIncomeSourceModal(id){
       <button class="btn" onclick="openIncomeManageModal()">취소</button>
       <button class="btn btn-primary" onclick="saveIncomeSource(${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveIncomeSource(id){
   const name = document.getElementById('f-iname').value.trim();
@@ -623,7 +694,7 @@ function openTransferModal(id){
       <button class="btn" onclick="closeModal()">취소</button>
       <button class="btn btn-primary" onclick="saveTransfer(${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveTransfer(id){
   const bank = document.getElementById('f-bank').value.trim();
@@ -658,67 +729,72 @@ function deleteTransfer(id){
     saveState(); closeModal(); render();
   });
 }
-function renderEntriesModal(title, entries, addFnName, delFnName, itemId){
+function renderEntriesListModal(title, entries, store, itemId){
   let html = `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">${title}</p>`;
   html += entries.length ? entries.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
       <span style="font-size:13px;">${e.label}</span>
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="font-size:13px;">${formatWon(e.amount)}</span>
-        <button class="iconbtn" onclick="${delFnName}('${itemId}','${e.id}')">✕</button>
+        <button class="iconbtn" onclick="openEntryEditModal('${store}','${itemId}','${e.id}')">✎</button>
       </div>
     </div>`).join('') : `<p class="desc" style="padding:6px 0">아직 세부내역이 없어요</p>`;
   const total = entries.reduce((s,e) => s + e.amount, 0);
   html += `<div style="display:flex;justify-content:space-between;padding:8px 0;border-top:1px solid var(--border);margin-top:4px;">
     <span style="font-size:13px;font-weight:500;">합계</span><span style="font-size:13px;font-weight:500;">${formatWon(total)}</span>
   </div>`;
-  html += `
-    <div class="field" style="margin-top:14px;"><label>항목명</label><input id="f-elabel" placeholder="예: 롯데카드 청구서"></div>
-    <div class="field"><label>금액</label><input id="f-eamount" type="number"></div>
-    <div class="modal-actions">
-      <button class="btn" onclick="closeModal()">닫기</button>
-      <button class="btn btn-primary" onclick="${addFnName}('${itemId}')">추가</button>
-    </div>`;
+  html += `<div style="text-align:right;margin-top:10px;">
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;font-size:12px;" onclick="openEntryEditModal('${store}','${itemId}', null)">+ 추가</button>
+  </div>`;
+  html += `<div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button></div>`;
   return html;
+}
+function reopenEntriesModal(store, itemId){
+  if(store === 'transferBudgetEntries') openBudgetEntriesModal(itemId);
+  else openActualEntriesModal(itemId);
+}
+function openEntryEditModal(store, itemId, entryId){
+  const list = ((state[store][viewMonth] || {})[itemId]) || [];
+  const entry = entryId ? list.find(e => e.id === entryId) : null;
+  document.getElementById('modalContent').innerHTML = `
+    <div class="field"><label>항목명</label><input id="f-elabel" value="${entry ? entry.label : ''}" placeholder="예: 롯데카드 청구서"></div>
+    <div class="field"><label>금액</label><input id="f-eamount" type="number" value="${entry ? entry.amount : ''}"></div>
+    <div class="modal-actions">
+      ${entry ? `<button class="btn btn-danger" onclick="deleteEntry('${store}','${itemId}','${entryId}')">삭제</button>` : ''}
+      <button class="btn" onclick="reopenEntriesModal('${store}','${itemId}')">취소</button>
+      <button class="btn btn-primary" onclick="saveEntry('${store}','${itemId}', ${entry ? `'${entryId}'` : 'null'})">저장</button>
+    </div>`;
+  showModal();
+}
+function saveEntry(store, itemId, entryId){
+  const label = document.getElementById('f-elabel').value.trim();
+  const amountRaw = document.getElementById('f-eamount').value;
+  if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
+  if(!state[store][viewMonth]) state[store][viewMonth] = {};
+  if(!state[store][viewMonth][itemId]) state[store][viewMonth][itemId] = [];
+  const list = state[store][viewMonth][itemId];
+  if(entryId){
+    const entry = list.find(e => e.id === entryId);
+    entry.label = label; entry.amount = parseInt(amountRaw, 10) || 0;
+  } else {
+    list.push({ id: uid(), label, amount: parseInt(amountRaw, 10) || 0 });
+  }
+  saveState(); render(); reopenEntriesModal(store, itemId);
+}
+function deleteEntry(store, itemId, entryId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    state[store][viewMonth][itemId] = state[store][viewMonth][itemId].filter(e => e.id !== entryId);
+    saveState(); render(); reopenEntriesModal(store, itemId);
+  });
 }
 function openBudgetEntriesModal(itemId){
   const entries = (state.transferBudgetEntries[viewMonth] || {})[itemId] || [];
-  document.getElementById('modalContent').innerHTML = renderEntriesModal('예산 세부내역', entries, 'addBudgetEntry', 'deleteBudgetEntry', itemId);
-  document.getElementById('modalOverlay').classList.add('open');
-}
-function addBudgetEntry(itemId){
-  const label = document.getElementById('f-elabel').value.trim();
-  const amountRaw = document.getElementById('f-eamount').value;
-  if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
-  if(!state.transferBudgetEntries[viewMonth]) state.transferBudgetEntries[viewMonth] = {};
-  if(!state.transferBudgetEntries[viewMonth][itemId]) state.transferBudgetEntries[viewMonth][itemId] = [];
-  state.transferBudgetEntries[viewMonth][itemId].push({ id: uid(), label, amount: parseInt(amountRaw, 10) || 0 });
-  saveState(); render(); openBudgetEntriesModal(itemId);
-}
-function deleteBudgetEntry(itemId, entryId){
-  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
-    state.transferBudgetEntries[viewMonth][itemId] = state.transferBudgetEntries[viewMonth][itemId].filter(e => e.id !== entryId);
-    saveState(); render(); openBudgetEntriesModal(itemId);
-  });
+  document.getElementById('modalContent').innerHTML = renderEntriesListModal('예산 세부내역', entries, 'transferBudgetEntries', itemId);
+  showModal();
 }
 function openActualEntriesModal(itemId){
   const entries = (state.transferActualEntries[viewMonth] || {})[itemId] || [];
-  document.getElementById('modalContent').innerHTML = renderEntriesModal('실이체 세부내역', entries, 'addActualEntry', 'deleteActualEntry', itemId);
-  document.getElementById('modalOverlay').classList.add('open');
-}
-function addActualEntry(itemId){
-  const label = document.getElementById('f-elabel').value.trim();
-  const amountRaw = document.getElementById('f-eamount').value;
-  if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
-  if(!state.transferActualEntries[viewMonth]) state.transferActualEntries[viewMonth] = {};
-  if(!state.transferActualEntries[viewMonth][itemId]) state.transferActualEntries[viewMonth][itemId] = [];
-  state.transferActualEntries[viewMonth][itemId].push({ id: uid(), label, amount: parseInt(amountRaw, 10) || 0 });
-  saveState(); render(); openActualEntriesModal(itemId);
-}
-function deleteActualEntry(itemId, entryId){
-  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
-    state.transferActualEntries[viewMonth][itemId] = state.transferActualEntries[viewMonth][itemId].filter(e => e.id !== entryId);
-    saveState(); render(); openActualEntriesModal(itemId);
-  });
+  document.getElementById('modalContent').innerHTML = renderEntriesListModal('실이체 세부내역', entries, 'transferActualEntries', itemId);
+  showModal();
 }
 
 /* ---------- CARDS ---------- */
@@ -797,7 +873,7 @@ function openCardEntriesModal(cardId){
 
   html += `<p style="font-size:13px;font-weight:500;margin:0 0 6px;">사용내역</p>`;
   html += entries.length ? entries.map(e => `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
-      <div><span style="font-size:13px;">${e.date}</span>${e.excluded ? `<span style="font-size:10px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;">실적제외</span>` : ''}${e.memo ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${e.memo}</p>` : ''}</div>
+      <div><span style="font-size:13px;">${e.date}</span>${e.excluded ? `<span style="font-size:10px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;">실적제외</span>` : ''}${e.memo ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;white-space:pre-wrap;">${e.memo}</p>` : ''}</div>
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="font-size:13px;${e.excluded ? 'color:var(--muted);' : ''}">${formatWon(e.amount)}</span>
         <button class="iconbtn" onclick="openCardUsageModal('${cardId}','${e.id}')">✎</button>
@@ -808,7 +884,7 @@ function openCardEntriesModal(cardId){
   </div>`;
   html += `<div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button></div>`;
   document.getElementById('modalContent').innerHTML = html;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function openCardUsageModal(cardId, entryId){
   const entries = (state.cardEntries[viewMonth] || {})[cardId] || [];
@@ -817,7 +893,7 @@ function openCardUsageModal(cardId, entryId){
   document.getElementById('modalContent').innerHTML = `
     <div class="field"><label>날짜</label><input id="f-cdate" type="date" value="${item ? item.date : todayStr}"></div>
     <div class="field"><label>금액</label><input id="f-camount" type="number" value="${item ? item.amount : ''}"></div>
-    <div class="field"><label>메모 (선택)</label><input id="f-cmemo" value="${item ? item.memo : ''}" placeholder="예: 마트, 주유"></div>
+    <div class="field"><label>메모 (선택)</label><textarea id="f-cmemo" rows="3" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="예: 마트, 주유">${item ? item.memo : ''}</textarea></div>
     <div class="field" style="display:flex;align-items:center;gap:8px;">
       <input type="checkbox" id="f-cexcluded" style="width:auto;" ${item && item.excluded ? 'checked' : ''}>
       <label for="f-cexcluded" style="margin:0;font-size:13px;color:var(--text);">이 결제는 카드 실적에서 제외</label>
@@ -827,7 +903,7 @@ function openCardUsageModal(cardId, entryId){
       <button class="btn" onclick="openCardEntriesModal('${cardId}')">취소</button>
       <button class="btn btn-primary" onclick="saveCardUsage('${cardId}', ${item ? `'${entryId}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveCardUsage(cardId, entryId){
   const date = document.getElementById('f-cdate').value;
@@ -860,7 +936,7 @@ function openFixedItemModal(cardId, itemId){
       <button class="btn" onclick="openCardEntriesModal('${cardId}')">취소</button>
       <button class="btn btn-primary" onclick="saveFixedItem('${cardId}', ${item ? `'${itemId}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveFixedItem(cardId, itemId){
   const label = document.getElementById('f-flabel').value.trim();
@@ -916,7 +992,7 @@ function openCardTiersModal(cardId){
   </div>`;
   html += `<div class="modal-actions"><button class="btn" onclick="closeModal()">닫기</button></div>`;
   document.getElementById('modalContent').innerHTML = html;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function openTierModal(cardId, tierId){
   const card = state.cards.find(c => c.id === cardId);
@@ -930,7 +1006,7 @@ function openTierModal(cardId, tierId){
       <button class="btn" onclick="openCardTiersModal('${cardId}')">취소</button>
       <button class="btn btn-primary" onclick="saveTier('${cardId}', ${item ? `'${tierId}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveTier(cardId, tierId){
   const amount = parseInt(document.getElementById('f-tamount').value, 10) || 0;
@@ -965,7 +1041,7 @@ function openCardModal(id){
       <button class="btn" onclick="closeModal()">취소</button>
       <button class="btn btn-primary" onclick="saveCard(${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveCard(id){
   const name = document.getElementById('f-name').value.trim();
@@ -993,6 +1069,27 @@ function sectionHeader(label, type, opener){
     <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 10px;" onclick="${opener}('${type}', null)">+ 추가</button>
   </div>`;
 }
+function renderPaymentLogSection(itemId, log){
+  let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
+    <span class="desc" style="margin:0">납입 기록</span>
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 8px;" onclick="openPaymentLogModal('${itemId}', null)">+ 기록추가</button>
+  </div>`;
+  const sorted = (log || []).slice().sort((a,b) => b.date.localeCompare(a.date));
+  if(sorted.length){
+    html += `<div style="background:var(--bg);border-radius:8px;padding:2px 10px;margin-top:6px;">`;
+    sorted.forEach((p,i) => {
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;${i < sorted.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
+        <span style="font-size:13px;">${p.date}</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:13px;">${formatWon(p.amount)}</span>
+          <button class="iconbtn" onclick="openPaymentLogModal('${itemId}','${p.id}')">✎</button>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+  return html;
+}
 function renderSavingsRow(d, prog){
   let html = `<div class="row" style="display:block">
     <div style="display:flex;justify-content:space-between;align-items:center">
@@ -1006,12 +1103,23 @@ function renderSavingsRow(d, prog){
     html += `<div class="progress ${prog.diff <= 0 ? 'done' : ''}"><div style="width:${prog.pct}%"></div></div>`;
   }
   const maturityLabel = d.maturityDate ? (prog.diff >= 0 ? `D-${prog.diff}` : '만기 지남') : '만기 없음';
+
+  if(d.type === '적금' && d.mode === '자유'){
+    html += `<p class="desc">자유적금 · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
+    if(d.memo) html += `<p class="desc" style="white-space:pre-wrap;">${d.memo}</p>`;
+    html += `<div style="background:var(--bg);border-radius:8px;padding:8px 10px;margin-top:6px;">
+      <p style="font-size:13px;font-weight:500;margin:0;">지금까지 ${formatWon(Math.round(prog.principal))} 납입</p>
+    </div>`;
+    html += renderPaymentLogSection(d.id, d.paymentLog);
+    html += `</div>`;
+    return html;
+  }
   if(d.type === '적금'){
-    html += `<p class="desc">월 ${formatWon(d.monthlyAmount)} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
+    html += `<p class="desc">월 ${formatWon(d.monthlyAmount)}${d.payDay ? ' · 매월 ' + d.payDay + '일' : ''} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
   } else {
     html += `<p class="desc">가입 ${formatWon(d.principalAmount)} · 연 ${d.interestRate || 0}% · ${d.openDate} 개설 · ${d.maturityDate ? d.maturityDate + ' 만기 · ' + maturityLabel : '만기 없음'}</p>`;
   }
-  if(d.memo) html += `<p class="desc">${d.memo}</p>`;
+  if(d.memo) html += `<p class="desc" style="white-space:pre-wrap;">${d.memo}</p>`;
   html += `<div style="background:var(--bg);border-radius:8px;padding:8px 10px;margin-top:6px;">`;
   if(d.type === '적금'){
     html += `<p style="font-size:13px;font-weight:500;margin:0;">지금까지 ${formatWon(Math.round(prog.principal))} 납입</p>`;
@@ -1030,12 +1138,20 @@ function renderFundRow(d){
         <button class="iconbtn" onclick="openSavingsModal('펀드연금','${d.id}')">✎</button>
         <button class="iconbtn" onclick="toggleMatured('${d.id}')">${d.matured ? '↺' : '✓'}</button>
       </div>
-    </div>
-    <p class="desc">${d.frequency} ${formatWon(d.contributionAmount)} · ${d.openDate} 시작 · 누적 납입 ${formatWon(Math.round(principal))}</p>`;
-  if(d.memo) html += `<p class="desc">${d.memo}</p>`;
+    </div>`;
+  let infoLine;
+  if(d.frequency === '월') infoLine = `월 ${formatWon(d.contributionAmount)}${d.payDay ? ' · 매월 ' + d.payDay + '일' : ''} · ${d.openDate} 시작`;
+  else if(d.frequency === '주') infoLine = `주 ${formatWon(d.contributionAmount)} · ${d.openDate} 시작`;
+  else if(d.frequency === '없음') infoLine = `일시납 ${formatWon(d.initialAmount)} · ${d.openDate} 시작`;
+  else infoLine = `비정기 · ${d.openDate} 시작`;
+  html += `<p class="desc">${infoLine} · 누적 납입 ${formatWon(Math.round(principal))}</p>`;
+  if(d.memo) html += `<p class="desc" style="white-space:pre-wrap;">${d.memo}</p>`;
+  if(d.frequency === '비정기'){
+    html += renderPaymentLogSection(d.id, d.paymentLog);
+  }
   html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
     <span class="desc" style="margin:0">평가금액 기록</span>
-    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 8px;" onclick="openValuationModal('${d.id}')">+ 기록추가</button>
+    <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 8px;" onclick="openValuationModal('${d.id}', null)">+ 기록추가</button>
   </div>`;
   const vlist = (d.valuations || []).slice().sort((a,b) => b.date.localeCompare(a.date));
   if(vlist.length){
@@ -1044,10 +1160,13 @@ function renderFundRow(d){
       const asOf = new Date(v.date + 'T00:00:00');
       const gain = v.amount - fundPrincipalAsOf(d, asOf);
       const sign = gain >= 0 ? '+' : '';
-      html += `<div style="display:flex;justify-content:space-between;padding:8px 0;${i < vlist.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;${i < vlist.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
         <span style="font-size:13px;">${v.date}</span>
-        <span style="font-size:13px;">${formatWon(v.amount)}</span>
-        <span style="font-size:12px;color:var(--accent);">${sign}${formatWon(gain)}</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:13px;">${formatWon(v.amount)}</span>
+          <span style="font-size:12px;color:var(--accent);">${sign}${formatWon(gain)}</span>
+          <button class="iconbtn" onclick="openValuationModal('${d.id}','${v.id}')">✎</button>
+        </div>
       </div>`;
     });
     html += `</div>`;
@@ -1072,7 +1191,7 @@ function renderCompletedRow(d){
 function renderDeposits(){
   const el = document.getElementById('screen-deposits');
 
-  const savingsAll = state.deposits.filter(d => d.type === '적금').map(d => ({ item: d, prog: savingsProgress(d) }));
+  const savingsAll = state.deposits.filter(d => d.type === '적금').map(d => ({ item: d, prog: d.mode === '자유' ? freeSavingsProgress(d) : savingsProgress(d) }));
   const depositsAll = state.deposits.filter(d => d.type === '예금').map(d => ({ item: d, prog: depositProgress(d) }));
   const fundsAll = state.deposits.filter(d => d.type === '펀드연금');
 
@@ -1114,9 +1233,9 @@ function renderDeposits(){
   html += deposits.length ? deposits.map(({item,prog}) => renderSavingsRow(item, prog)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 예금이 없어요</p>`;
   html += `</div>`;
 
-  html += sectionHeader('펀드·연금', '펀드연금');
+  html += sectionHeader('펀드·연금·기타', '펀드연금');
   html += `<div class="card">`;
-  html += funds.length ? funds.map(item => renderFundRow(item)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 펀드·연금이 없어요</p>`;
+  html += funds.length ? funds.map(item => renderFundRow(item)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 펀드·연금·기타가 없어요</p>`;
   html += `</div>`;
 
   html += `<p style="font-size:13px;font-weight:500;margin:0 0 8px;">완료</p>`;
@@ -1131,16 +1250,29 @@ function toggleMatured(id){
   item.matured = !item.matured;
   saveState(); render();
 }
-function openSavingsModal(type, id){
+function openSavingsModal(type, id, override){
   const item = id ? state.deposits.find(d => d.id === id) : null;
   const modal = document.getElementById('modalContent');
   let fields = `<div class="field"><label>이름</label><input id="f-name" value="${item ? item.name : ''}"></div>`;
+
   if(type === '적금'){
-    fields += `
-      <div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>
-      <div class="field"><label>만기일 (없으면 비워두기)</label><input id="f-maturity" type="date" value="${item && item.maturityDate ? item.maturityDate : ''}"></div>
-      <div class="field"><label>월납입금액</label><input id="f-monthly" type="number" value="${item ? item.monthlyAmount : ''}"></div>
-      <div class="field"><label>약정이율(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>`;
+    const mode = override || (item ? item.mode : '정기');
+    fields += `<div class="field"><label>적금 방식</label>
+      <select id="f-mode" onchange="openSavingsModal('적금', ${id ? `'${id}'` : 'null'}, this.value)" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+        <option value="정기" ${mode === '정기' ? 'selected' : ''}>정기적금</option>
+        <option value="자유" ${mode === '자유' ? 'selected' : ''}>자유적금</option>
+      </select>
+    </div>`;
+    fields += `<div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>
+      <div class="field"><label>만기일 (없으면 비워두기)</label><input id="f-maturity" type="date" value="${item && item.maturityDate ? item.maturityDate : ''}"></div>`;
+    if(mode === '정기'){
+      fields += `<div class="field"><label>월납입금액</label><input id="f-monthly" type="number" value="${item ? item.monthlyAmount : ''}"></div>
+        <div class="field"><label>납입일 (1~31, 없으면 개설일과 같은 날)</label><input id="f-payday" type="number" min="1" max="31" value="${item && item.payDay ? item.payDay : ''}"></div>
+        <div class="field"><label>약정이율(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>`;
+    } else {
+      fields += `<div class="field"><label>약정이율(%) (선택)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>
+        <p class="desc" style="margin:0 0 10px;">저장하면 "납입 기록"에서 넣을 때마다 날짜·금액을 하나씩 추가해줘</p>`;
+    }
   } else if(type === '예금'){
     fields += `
       <div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>
@@ -1148,50 +1280,85 @@ function openSavingsModal(type, id){
       <div class="field"><label>가입금액</label><input id="f-principal" type="number" value="${item ? item.principalAmount : ''}"></div>
       <div class="field"><label>약정이율(%)</label><input id="f-rate" type="number" step="0.01" value="${item ? item.interestRate : ''}"></div>`;
   } else {
-    fields += `
-      <div class="field"><label>납입주기</label>
-        <select id="f-frequency" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
-          <option value="월" ${item && item.frequency === '월' ? 'selected' : ''}>월</option>
-          <option value="주" ${item && item.frequency === '주' ? 'selected' : ''}>주</option>
-        </select>
-      </div>
-      <div class="field"><label>납입금액</label><input id="f-contribution" type="number" value="${item ? item.contributionAmount : ''}"></div>
-      <div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>`;
+    const freq = override || (item ? item.frequency : '월');
+    fields += `<div class="field"><label>납입주기</label>
+      <select id="f-frequency" onchange="openSavingsModal('펀드연금', ${id ? `'${id}'` : 'null'}, this.value)" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;">
+        <option value="월" ${freq === '월' ? 'selected' : ''}>월</option>
+        <option value="주" ${freq === '주' ? 'selected' : ''}>주</option>
+        <option value="없음" ${freq === '없음' ? 'selected' : ''}>없음 (일시납)</option>
+        <option value="비정기" ${freq === '비정기' ? 'selected' : ''}>비정기</option>
+      </select>
+    </div>`;
+    fields += `<div class="field"><label>개설일</label><input id="f-open" type="date" value="${item ? item.openDate : ''}"></div>`;
+    if(freq === '월'){
+      fields += `<div class="field"><label>납입금액</label><input id="f-contribution" type="number" value="${item ? item.contributionAmount : ''}"></div>
+        <div class="field"><label>납입일 (1~31, 없으면 개설일과 같은 날)</label><input id="f-payday" type="number" min="1" max="31" value="${item && item.payDay ? item.payDay : ''}"></div>`;
+    } else if(freq === '주'){
+      fields += `<div class="field"><label>납입금액</label><input id="f-contribution" type="number" value="${item ? item.contributionAmount : ''}"></div>`;
+    } else if(freq === '없음'){
+      fields += `<div class="field"><label>납입금액 (최초 1회)</label><input id="f-initial" type="number" value="${item ? item.initialAmount : ''}"></div>`;
+    } else {
+      fields += `<p class="desc" style="margin:0 0 10px;">저장하면 "납입 기록"에서 넣을 때마다 날짜·금액을 하나씩 추가해줘</p>`;
+    }
   }
-  fields += `<div class="field"><label>메모</label><input id="f-memo" value="${item ? item.memo : ''}"></div>`;
+  fields += `<div class="field"><label>메모</label><textarea id="f-memo" rows="3" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box;">${item ? item.memo : ''}</textarea></div>`;
   fields += `<div class="modal-actions">
       ${item ? `<button class="btn btn-danger" onclick="deleteSavings('${id}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
       <button class="btn btn-primary" onclick="saveSavings('${type}', ${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
   modal.innerHTML = fields;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveSavings(type, id){
+  const item = id ? state.deposits.find(d => d.id === id) : null;
   const name = document.getElementById('f-name').value.trim();
   const memo = document.getElementById('f-memo').value.trim();
   if(!name){ alert('이름을 입력해줘'); return; }
 
   const data = { name, memo };
-  const openDate = document.getElementById('f-open').value;
-  if(!openDate){ alert('개설일은 필수야'); return; }
-  data.openDate = openDate;
 
   if(type === '적금'){
+    const mode = document.getElementById('f-mode').value;
+    const openDate = document.getElementById('f-open').value;
+    if(!openDate){ alert('개설일은 필수야'); return; }
+    data.mode = mode;
+    data.openDate = openDate;
     data.maturityDate = document.getElementById('f-maturity').value || null;
-    data.monthlyAmount = parseInt(document.getElementById('f-monthly').value, 10) || 0;
-    data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
+    if(mode === '정기'){
+      data.monthlyAmount = parseInt(document.getElementById('f-monthly').value, 10) || 0;
+      data.payDay = parseInt(document.getElementById('f-payday').value, 10) || null;
+      data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
+    } else {
+      data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
+      data.paymentLog = (item && item.paymentLog) ? item.paymentLog : [];
+    }
   } else if(type === '예금'){
+    const openDate = document.getElementById('f-open').value;
+    if(!openDate){ alert('개설일은 필수야'); return; }
+    data.openDate = openDate;
     data.maturityDate = document.getElementById('f-maturity').value || null;
     data.principalAmount = parseInt(document.getElementById('f-principal').value, 10) || 0;
     data.interestRate = parseFloat(document.getElementById('f-rate').value) || 0;
   } else {
-    data.frequency = document.getElementById('f-frequency').value;
-    data.contributionAmount = parseInt(document.getElementById('f-contribution').value, 10) || 0;
+    const frequency = document.getElementById('f-frequency').value;
+    const openDate = document.getElementById('f-open').value;
+    if(!openDate){ alert('개설일은 필수야'); return; }
+    data.frequency = frequency;
+    data.openDate = openDate;
+    if(frequency === '월'){
+      data.contributionAmount = parseInt(document.getElementById('f-contribution').value, 10) || 0;
+      data.payDay = parseInt(document.getElementById('f-payday').value, 10) || null;
+    } else if(frequency === '주'){
+      data.contributionAmount = parseInt(document.getElementById('f-contribution').value, 10) || 0;
+    } else if(frequency === '없음'){
+      data.initialAmount = parseInt(document.getElementById('f-initial').value, 10) || 0;
+    } else {
+      data.paymentLog = (item && item.paymentLog) ? item.paymentLog : [];
+    }
   }
 
   if(id){
-    const item = state.deposits.find(d => d.id === id);
     Object.assign(item, data);
   } else {
     data.type = type;
@@ -1202,32 +1369,82 @@ function saveSavings(type, id){
   }
   saveState(); closeModal(); render();
 }
+function openPaymentLogModal(itemId, logId){
+  const item = state.deposits.find(d => d.id === itemId);
+  const entry = logId ? item.paymentLog.find(p => p.id === logId) : null;
+  const todayStr = new Date().toISOString().slice(0,10);
+  document.getElementById('modalContent').innerHTML = `
+    <div class="field"><label>날짜</label><input id="f-pdate" type="date" value="${entry ? entry.date : todayStr}"></div>
+    <div class="field"><label>금액</label><input id="f-pamount" type="number" value="${entry ? entry.amount : ''}"></div>
+    <div class="modal-actions">
+      ${entry ? `<button class="btn btn-danger" onclick="deletePaymentLog('${itemId}','${logId}')">삭제</button>` : ''}
+      <button class="btn" onclick="closeModal()">취소</button>
+      <button class="btn btn-primary" onclick="savePaymentLog('${itemId}', ${entry ? `'${logId}'` : 'null'})">저장</button>
+    </div>`;
+  showModal();
+}
+function savePaymentLog(itemId, logId){
+  const date = document.getElementById('f-pdate').value;
+  const amountRaw = document.getElementById('f-pamount').value;
+  if(!date || amountRaw === ''){ alert('날짜와 금액을 입력해줘'); return; }
+  const item = state.deposits.find(d => d.id === itemId);
+  if(!item.paymentLog) item.paymentLog = [];
+  if(logId){
+    const entry = item.paymentLog.find(p => p.id === logId);
+    entry.date = date; entry.amount = parseInt(amountRaw, 10) || 0;
+  } else {
+    item.paymentLog.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0 });
+  }
+  saveState(); render(); closeModal();
+}
+function deletePaymentLog(itemId, logId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    const item = state.deposits.find(d => d.id === itemId);
+    item.paymentLog = item.paymentLog.filter(p => p.id !== logId);
+    saveState(); render(); closeModal();
+  });
+}
 function deleteSavings(id){
   confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
     state.deposits = state.deposits.filter(d => d.id !== id);
     saveState(); closeModal(); render();
   });
 }
-function openValuationModal(id){
+function openValuationModal(itemId, valId){
+  const item = state.deposits.find(d => d.id === itemId);
+  const entry = valId ? item.valuations.find(v => v.id === valId) : null;
   const modal = document.getElementById('modalContent');
   const todayStr = new Date().toISOString().slice(0,10);
   modal.innerHTML = `
-    <div class="field"><label>확인일</label><input id="f-vdate" type="date" value="${todayStr}"></div>
-    <div class="field"><label>평가금액</label><input id="f-vamount" type="number"></div>
+    <div class="field"><label>확인일</label><input id="f-vdate" type="date" value="${entry ? entry.date : todayStr}"></div>
+    <div class="field"><label>평가금액</label><input id="f-vamount" type="number" value="${entry ? entry.amount : ''}"></div>
     <div class="modal-actions">
+      ${entry ? `<button class="btn btn-danger" onclick="deleteValuation('${itemId}','${valId}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="saveValuation('${id}')">저장</button>
+      <button class="btn btn-primary" onclick="saveValuation('${itemId}', ${entry ? `'${valId}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
-function saveValuation(id){
+function saveValuation(itemId, valId){
   const date = document.getElementById('f-vdate').value;
   const amountRaw = document.getElementById('f-vamount').value;
   if(!date || amountRaw === ''){ alert('날짜와 금액을 입력해줘'); return; }
-  const item = state.deposits.find(d => d.id === id);
+  const item = state.deposits.find(d => d.id === itemId);
   if(!item.valuations) item.valuations = [];
-  item.valuations.push({ date, amount: parseInt(amountRaw, 10) || 0 });
-  saveState(); closeModal(); render();
+  if(valId){
+    const entry = item.valuations.find(v => v.id === valId);
+    entry.date = date; entry.amount = parseInt(amountRaw, 10) || 0;
+  } else {
+    item.valuations.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0 });
+  }
+  saveState(); render(); closeModal();
+}
+function deleteValuation(itemId, valId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    const item = state.deposits.find(d => d.id === itemId);
+    item.valuations = item.valuations.filter(v => v.id !== valId);
+    saveState(); render(); closeModal();
+  });
 }
 
 /* ---------- DEBTS (부채현황) ---------- */
@@ -1242,17 +1459,27 @@ function renderDebtRow(d){
   } else {
     html += `<p class="desc">한도 ${formatWon(d.limit)} · 금리 ${d.interestRate || 0}% · ${d.startDate} 개설</p>`;
   }
-  if(d.memo) html += `<p class="desc">${d.memo}</p>`;
+  if(d.memo) html += `<p class="desc" style="white-space:pre-wrap;">${d.memo}</p>`;
   html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
-    <span class="desc" style="margin:0">잔액 기록</span>
+    <span class="desc" style="margin:0">납부내역</span>
     <div>
       <button class="iconbtn" onclick="openDebtModal('${d.type}','${d.id}')">✎</button>
-      <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;" onclick="openBalanceLogModal('${d.id}')">+ 기록추가</button>
+      <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:3px 8px;" onclick="openBalanceLogModal('${d.id}', null)">+ 내역추가</button>
     </div>
   </div>`;
   const logs = (d.balanceLog || []).slice().sort((a,b) => b.date.localeCompare(a.date));
   if(logs.length){
-    html += `<p class="desc" style="margin-top:4px;">최근 ${logs[0].date} · ${formatWon(logs[0].amount)}</p>`;
+    html += `<div style="background:var(--bg);border-radius:8px;padding:2px 10px;margin-top:6px;">`;
+    logs.forEach((l,i) => {
+      html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;${i < logs.length - 1 ? 'border-bottom:1px solid var(--border)' : ''}">
+        <span style="font-size:13px;">${l.date}</span>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="font-size:13px;">${formatWon(l.amount)}</span>
+          <button class="iconbtn" onclick="openBalanceLogModal('${d.id}','${l.id}')">✎</button>
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
   }
   html += `</div>`;
   return html;
@@ -1275,29 +1502,38 @@ function renderDebts(){
   el.innerHTML = html;
 }
 function openIncomeLogModal(id){
+  const item = id ? (state.incomeLog[viewMonth] || []).find(s => s.id === id) : null;
   const modal = document.getElementById('modalContent');
   const todayStr = new Date().toISOString().slice(0,10);
   modal.innerHTML = `
-    <div class="field"><label>날짜</label><input id="f-sdate" type="date" value="${todayStr}"></div>
-    <div class="field"><label>금액</label><input id="f-samount" type="number"></div>
-    <div class="field"><label>출처 (메모)</label><input id="f-smemo" placeholder="예: 배우자 입금, 병원비 실비"></div>
+    <p class="desc" style="margin:0 0 12px;">${monthLabel(viewMonth)} 수입으로 기록돼요</p>
+    <div class="field"><label>날짜 (실제 받은 날, 참고용)</label><input id="f-sdate" type="date" value="${item ? item.date : todayStr}"></div>
+    <div class="field"><label>금액</label><input id="f-samount" type="number" value="${item ? item.amount : ''}"></div>
+    <div class="field"><label>출처 (메모)</label><textarea id="f-smemo" rows="3" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box;" placeholder="예: 배우자 입금, 병원비 실비">${item ? item.memo : ''}</textarea></div>
     <div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteIncomeLog('${id}')">삭제</button>` : ''}
       <button class="btn" onclick="openIncomeManageModal()">취소</button>
-      <button class="btn btn-primary" onclick="saveIncomeLog()">저장</button>
+      <button class="btn btn-primary" onclick="saveIncomeLog(${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
-function saveIncomeLog(){
+function saveIncomeLog(id){
   const date = document.getElementById('f-sdate').value;
   const amountRaw = document.getElementById('f-samount').value;
   const memo = document.getElementById('f-smemo').value.trim();
   if(!date || amountRaw === ''){ alert('날짜와 금액을 입력해줘'); return; }
-  state.incomeLog.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0, memo });
+  if(!state.incomeLog[viewMonth]) state.incomeLog[viewMonth] = [];
+  if(id){
+    const item = state.incomeLog[viewMonth].find(s => s.id === id);
+    item.date = date; item.amount = parseInt(amountRaw, 10) || 0; item.memo = memo;
+  } else {
+    state.incomeLog[viewMonth].push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0, memo });
+  }
   saveState(); render(); openIncomeManageModal();
 }
 function deleteIncomeLog(id){
   confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
-    state.incomeLog = state.incomeLog.filter(s => s.id !== id);
+    state.incomeLog[viewMonth] = (state.incomeLog[viewMonth] || []).filter(s => s.id !== id);
     saveState(); render(); openIncomeManageModal();
   });
 }
@@ -1330,14 +1566,14 @@ function openDebtModal(type, id){
         <option value="배우자" ${item && item.payer === '배우자' ? 'selected' : ''}>배우자</option>
       </select>
     </div>
-    <div class="field"><label>메모</label><input id="f-memo" value="${item ? item.memo : ''}"></div>
+    <div class="field"><label>메모</label><textarea id="f-memo" rows="3" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box;">${item ? item.memo : ''}</textarea></div>
     <div class="modal-actions">
       ${item ? `<button class="btn btn-danger" onclick="deleteDebt('${id}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
       <button class="btn btn-primary" onclick="saveDebt('${type}', ${item ? `'${id}'` : 'null'})">저장</button>
     </div>`;
   modal.innerHTML = fields;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function saveDebt(type, id){
   const name = document.getElementById('f-name').value.trim();
@@ -1373,28 +1609,42 @@ function deleteDebt(id){
     saveState(); closeModal(); render();
   });
 }
-function openBalanceLogModal(id){
+function openBalanceLogModal(debtId, logId){
+  const debt = state.debts.find(d => d.id === debtId);
+  const item = logId ? (debt.balanceLog || []).find(l => l.id === logId) : null;
   const modal = document.getElementById('modalContent');
   const todayStr = new Date().toISOString().slice(0,10);
   modal.innerHTML = `
-    <div class="field"><label>확인일</label><input id="f-bdate" type="date" value="${todayStr}"></div>
-    <div class="field"><label>잔액</label><input id="f-bamount" type="number"></div>
+    <div class="field"><label>확인일</label><input id="f-bdate" type="date" value="${item ? item.date : todayStr}"></div>
+    <div class="field"><label>잔액</label><input id="f-bamount" type="number" value="${item ? item.amount : ''}"></div>
     <div class="modal-actions">
+      ${item ? `<button class="btn btn-danger" onclick="deleteBalanceLog('${debtId}','${logId}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="saveBalanceLog('${id}')">저장</button>
+      <button class="btn btn-primary" onclick="saveBalanceLog('${debtId}', ${item ? `'${logId}'` : 'null'})">저장</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
-function saveBalanceLog(id){
+function saveBalanceLog(debtId, logId){
   const date = document.getElementById('f-bdate').value;
   const amountRaw = document.getElementById('f-bamount').value;
   if(!date || amountRaw === ''){ alert('날짜와 잔액을 입력해줘'); return; }
-  const item = state.debts.find(d => d.id === id);
-  if(!item.balanceLog) item.balanceLog = [];
-  item.balanceLog.push({ date, amount: parseInt(amountRaw, 10) || 0 });
-  saveState(); closeModal(); render();
+  const debt = state.debts.find(d => d.id === debtId);
+  if(!debt.balanceLog) debt.balanceLog = [];
+  if(logId){
+    const item = debt.balanceLog.find(l => l.id === logId);
+    item.date = date; item.amount = parseInt(amountRaw, 10) || 0;
+  } else {
+    debt.balanceLog.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0 });
+  }
+  saveState(); render(); closeModal();
 }
-
+function deleteBalanceLog(debtId, logId){
+  confirmDelete('삭제할까요? 되돌릴 수 없어요.', () => {
+    const debt = state.debts.find(d => d.id === debtId);
+    debt.balanceLog = debt.balanceLog.filter(l => l.id !== logId);
+    saveState(); render(); closeModal();
+  });
+}
 
 /* ---------- BACKUP ---------- */
 function openBackupModal(){
@@ -1410,7 +1660,7 @@ function openBackupModal(){
     <div class="modal-actions" style="margin-top:14px;">
       <button class="btn" onclick="closeModal()">닫기</button>
     </div>`;
-  document.getElementById('modalOverlay').classList.add('open');
+  showModal();
 }
 function exportData(){
   const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
@@ -1444,7 +1694,7 @@ function importData(input){
         <button class="btn" onclick="openBackupModal()">취소</button>
         <button class="btn btn-primary" onclick="confirmImport()">불러오기</button>
       </div>`;
-    document.getElementById('modalOverlay').classList.add('open');
+    showModal();
   };
   reader.readAsText(file);
 }
@@ -1456,7 +1706,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v24';
+const APP_VERSION = 'v26';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
