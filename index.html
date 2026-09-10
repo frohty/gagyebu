@@ -634,30 +634,55 @@ function renderTransfer(){
         <span class="amt">예산 ${formatWon(budget)}</span>
         <button class="iconbtn" onclick="openTransferModal('${t.id}')">✎</button>
       </div>
-      <div style="display:flex;gap:14px;padding-left:34px;margin-top:2px;">
-        <button class="iconbtn" style="padding:0;font-size:11px;color:var(--muted);" onclick="openBudgetEntriesModal('${t.id}')">예산 세부</button>
-        <button class="iconbtn" style="padding:0;font-size:11px;color:var(--muted);" onclick="openActualEntriesModal('${t.id}')">실이체 세부</button>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding-left:34px;margin-top:2px;">
+        <div style="display:flex;gap:14px;">
+          <button class="iconbtn" style="padding:0;font-size:11px;color:var(--muted);" onclick="openBudgetEntriesModal('${t.id}')">예산 세부</button>
+          <button class="iconbtn" style="padding:0;font-size:11px;color:var(--muted);" onclick="openActualEntriesModal('${t.id}')">실이체 세부</button>
+        </div>
+        <div>
+          <button class="iconbtn" onclick="moveTransfer('${t.id}',-1)">▲</button>
+          <button class="iconbtn" onclick="moveTransfer('${t.id}',1)">▼</button>
+        </div>
       </div>
     </div>`;
   });
   html += `</div>`;
   el.innerHTML = html;
 }
+function moveTransfer(id, delta){
+  const visible = getVisibleTransfers(viewMonth);
+  const idx = visible.findIndex(t => t.id === id);
+  const newIdx = idx + delta;
+  if(newIdx < 0 || newIdx >= visible.length) return;
+  const realIdxA = state.transfers.indexOf(visible[idx]);
+  const realIdxB = state.transfers.indexOf(visible[newIdx]);
+  [state.transfers[realIdxA], state.transfers[realIdxB]] = [state.transfers[realIdxB], state.transfers[realIdxA]];
+  saveState(); render();
+}
 function updateIncomeAmount(sourceId, val){
   if(!state.incomeMonthly[viewMonth]) state.incomeMonthly[viewMonth] = {};
   state.incomeMonthly[viewMonth][sourceId] = parseInt(val, 10) || 0;
   saveState(); render();
 }
+function moveIncomeSource(id, delta){
+  const idx = state.incomeSources.findIndex(s => s.id === id);
+  const newIdx = idx + delta;
+  if(newIdx < 0 || newIdx >= state.incomeSources.length) return;
+  [state.incomeSources[idx], state.incomeSources[newIdx]] = [state.incomeSources[newIdx], state.incomeSources[idx]];
+  saveState(); render(); openIncomeManageModal();
+}
 function openIncomeManageModal(){
   const modal = document.getElementById('modalContent');
   const incomeVals = state.incomeMonthly[viewMonth] || {};
   let html = `<p style="font-size:14px;font-weight:500;margin:0 0 10px;">급여</p>`;
-  html += state.incomeSources.length ? state.incomeSources.map(src => {
+  html += state.incomeSources.length ? state.incomeSources.map((src,i) => {
     const val = incomeVals[src.id] || 0;
     return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);">
       <span style="font-size:13px;">${src.name}</span>
       <div style="display:flex;align-items:center;gap:6px;">
         <input type="number" value="${val || ''}" placeholder="0" style="width:100px;text-align:right;padding:6px;border:1px solid var(--border);border-radius:6px;" onchange="updateIncomeAmount('${src.id}',this.value)">
+        <button class="iconbtn" onclick="moveIncomeSource('${src.id}',-1)">▲</button>
+        <button class="iconbtn" onclick="moveIncomeSource('${src.id}',1)">▼</button>
         <button class="iconbtn" onclick="openIncomeSourceModal('${src.id}')">✎</button>
       </div>
     </div>`;
@@ -897,10 +922,12 @@ function openCardEntriesModal(cardId){
   html += `<p class="desc" style="margin:0 0 10px;">실적 인정 ${formatWon(countedTotal)}${paidTotal !== countedTotal ? ` · 실제 결제 ${formatWon(paidTotal)}` : ''}</p>`;
 
   html += `<p style="font-size:13px;font-weight:500;margin:14px 0 6px;">고정지출실적</p>`;
-  html += (card.fixedItems && card.fixedItems.length) ? card.fixedItems.map(f => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
+  html += (card.fixedItems && card.fixedItems.length) ? card.fixedItems.map((f,i,arr) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
       <div><span style="font-size:13px;">${f.label}</span>${f.date ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${f.date}</p>` : ''}</div>
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="font-size:13px;">${formatWon(getFixedItemAmount(f, viewMonth))}</span>
+        <button class="iconbtn" onclick="moveFixedItem('${cardId}','${f.id}',-1)">▲</button>
+        <button class="iconbtn" onclick="moveFixedItem('${cardId}','${f.id}',1)">▼</button>
         <button class="iconbtn" onclick="openFixedItemModal('${cardId}','${f.id}')">✎</button>
       </div>
     </div>`).join('') : `<p class="desc" style="padding:4px 0">고정지출실적 없음</p>`;
@@ -957,6 +984,14 @@ function saveCardUsage(cardId, entryId){
   } else {
     list.push({ id: uid(), date, amount: parseInt(amountRaw, 10) || 0, memo, excluded });
   }
+  saveState(); render(); openCardEntriesModal(cardId);
+}
+function moveFixedItem(cardId, itemId, delta){
+  const card = state.cards.find(c => c.id === cardId);
+  const idx = card.fixedItems.findIndex(f => f.id === itemId);
+  const newIdx = idx + delta;
+  if(newIdx < 0 || newIdx >= card.fixedItems.length) return;
+  [card.fixedItems[idx], card.fixedItems[newIdx]] = [card.fixedItems[newIdx], card.fixedItems[idx]];
   saveState(); render(); openCardEntriesModal(cardId);
 }
 function openFixedItemModal(cardId, itemId){
@@ -1236,13 +1271,14 @@ function renderSavingsRow(d, prog){
   html += `</div>`;
   return html;
 }
-function renderFundRow(d){
+function renderFundRow(d, i, total){
   const today = new Date(); today.setHours(0,0,0,0);
   const principal = fundPrincipalAsOf(d, today);
   let html = `<div class="row" style="display:block">
     <div style="display:flex;justify-content:space-between;align-items:center">
       <span class="title">${d.name}${d.matured ? ' (완료)' : ''}${ownerTag(d.owner)}</span>
       <div>
+        ${i != null ? `<button class="iconbtn" onclick="moveFund('${d.id}',-1)">▲</button><button class="iconbtn" onclick="moveFund('${d.id}',1)">▼</button>` : ''}
         <button class="iconbtn" onclick="openSavingsModal('펀드연금','${d.id}')">✎</button>
         <button class="iconbtn" onclick="toggleMatured('${d.id}')">${d.matured ? '↺' : '✓'}</button>
       </div>
@@ -1296,6 +1332,25 @@ function renderCompletedRow(d){
     <button class="iconbtn" onclick="toggleMatured('${d.id}')">↺</button>
   </div>`;
 }
+function renderSavingsGroups(list, sortFn){
+  const groups = {};
+  const order = [];
+  list.forEach(x => {
+    const key = x.item.owner || '';
+    if(!(key in groups)){ groups[key] = []; order.push(key); }
+    groups[key].push(x);
+  });
+  order.forEach(key => groups[key].sort(sortFn));
+  if(order.length <= 1){
+    return list.slice().sort(sortFn).map(({item,prog}) => renderSavingsRow(item, prog)).join('');
+  }
+  let html = '';
+  order.forEach(key => {
+    html += `<p style="font-size:12px;color:var(--muted);margin:10px 0 4px;">${key || '미지정'}</p>`;
+    html += groups[key].map(({item,prog}) => renderSavingsRow(item, prog)).join('');
+  });
+  return html;
+}
 function renderDeposits(){
   const el = document.getElementById('screen-deposits');
 
@@ -1317,8 +1372,6 @@ function renderDeposits(){
     if(db == null) return -1;
     return da - db;
   };
-  savings.sort(sortFn);
-  deposits.sort(sortFn);
 
   let html = '';
   const allDated = savings.concat(deposits).filter(x => x.prog.diff != null);
@@ -1333,17 +1386,17 @@ function renderDeposits(){
 
   html += sectionHeader('적금', '적금');
   html += `<div class="card">`;
-  html += savings.length ? savings.map(({item,prog}) => renderSavingsRow(item, prog)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 적금이 없어요</p>`;
+  html += savings.length ? renderSavingsGroups(savings, sortFn) : `<p class="desc" style="padding:12px 0">아직 등록된 적금이 없어요</p>`;
   html += `</div>`;
 
   html += sectionHeader('예금', '예금');
   html += `<div class="card">`;
-  html += deposits.length ? deposits.map(({item,prog}) => renderSavingsRow(item, prog)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 예금이 없어요</p>`;
+  html += deposits.length ? renderSavingsGroups(deposits, sortFn) : `<p class="desc" style="padding:12px 0">아직 등록된 예금이 없어요</p>`;
   html += `</div>`;
 
   html += sectionHeader('펀드·연금·기타', '펀드연금');
   html += `<div class="card">`;
-  html += funds.length ? funds.map(item => renderFundRow(item)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 펀드·연금·기타가 없어요</p>`;
+  html += funds.length ? funds.map((item,i) => renderFundRow(item, i, funds.length)).join('') : `<p class="desc" style="padding:12px 0">아직 등록된 펀드·연금·기타가 없어요</p>`;
   html += `</div>`;
 
   html += `<p style="font-size:13px;font-weight:500;margin:0 0 8px;">완료</p>`;
@@ -1352,6 +1405,16 @@ function renderDeposits(){
   html += `</div>`;
 
   el.innerHTML = html;
+}
+function moveFund(id, delta){
+  const funds = state.deposits.filter(d => d.type === '펀드연금' && !d.matured);
+  const idx = funds.findIndex(d => d.id === id);
+  const newIdx = idx + delta;
+  if(newIdx < 0 || newIdx >= funds.length) return;
+  const realIdxA = state.deposits.indexOf(funds[idx]);
+  const realIdxB = state.deposits.indexOf(funds[newIdx]);
+  [state.deposits[realIdxA], state.deposits[realIdxB]] = [state.deposits[realIdxB], state.deposits[realIdxA]];
+  saveState(); render();
 }
 function toggleMatured(id){
   const item = state.deposits.find(d => d.id === id);
@@ -1563,7 +1626,11 @@ function renderDebtRow(d){
   let html = `<div class="row" style="display:block">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
       <span class="title">${d.name}</span>
-      <span style="font-size:11px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 6px;">상환 ${d.payer}</span>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="font-size:11px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 6px;">상환 ${d.payer}</span>
+        <button class="iconbtn" onclick="moveDebt('${d.id}',-1)">▲</button>
+        <button class="iconbtn" onclick="moveDebt('${d.id}',1)">▼</button>
+      </div>
     </div>`;
   if(d.type === '고정대출'){
     html += `<p class="desc">원금 ${formatWon(d.principal)} · 금리 ${d.interestRate || 0}% · ${d.startDate} 실행 · ${d.maturityDate || '만기 미정'} 만기 · ${d.repaymentType}</p>`;
@@ -1594,6 +1661,17 @@ function renderDebtRow(d){
   }
   html += `</div>`;
   return html;
+}
+function moveDebt(id, delta){
+  const item = state.debts.find(d => d.id === id);
+  const sameType = state.debts.filter(d => d.type === item.type);
+  const idx = sameType.findIndex(d => d.id === id);
+  const newIdx = idx + delta;
+  if(newIdx < 0 || newIdx >= sameType.length) return;
+  const realIdxA = state.debts.indexOf(sameType[idx]);
+  const realIdxB = state.debts.indexOf(sameType[newIdx]);
+  [state.debts[realIdxA], state.debts[realIdxB]] = [state.debts[realIdxB], state.debts[realIdxA]];
+  saveState(); render();
 }
 function renderDebts(){
   const el = document.getElementById('screen-debts');
@@ -1817,7 +1895,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v30';
+const APP_VERSION = 'v31';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
