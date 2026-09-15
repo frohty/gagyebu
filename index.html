@@ -411,7 +411,7 @@ function getTierAmount(tier, monthKey){
   return tier.amount;
 }
 function getCardTotal(card, monthKey){
-  const fixedSum = (card.fixedItems || []).reduce((s,f) => s + getFixedItemAmount(f, monthKey), 0);
+  const fixedSum = (card.fixedItems || []).filter(f => !f.excluded).reduce((s,f) => s + getFixedItemAmount(f, monthKey), 0);
   const entries = (state.cardEntries[monthKey] || {})[card.id] || [];
   const countedEntries = entries.filter(e => !e.excluded).reduce((s,e) => s + e.amount, 0);
   return fixedSum + countedEntries;
@@ -923,9 +923,9 @@ function openCardEntriesModal(cardId){
 
   html += `<p style="font-size:13px;font-weight:500;margin:14px 0 6px;">고정지출실적</p>`;
   html += (card.fixedItems && card.fixedItems.length) ? card.fixedItems.map((f,i,arr) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
-      <div><span style="font-size:13px;">${f.label}</span>${f.date ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${f.date}</p>` : ''}</div>
+      <div><span style="font-size:13px;">${f.label}</span>${f.excluded ? `<span style="font-size:10px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;">실적제외</span>` : ''}${f.date ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${f.date}</p>` : ''}</div>
       <div style="display:flex;align-items:center;gap:6px;">
-        <span style="font-size:13px;">${formatWon(getFixedItemAmount(f, viewMonth))}</span>
+        <span style="font-size:13px;${f.excluded ? 'color:var(--muted);' : ''}">${formatWon(getFixedItemAmount(f, viewMonth))}</span>
         <button class="iconbtn" onclick="moveFixedItem('${cardId}','${f.id}',-1)">▲</button>
         <button class="iconbtn" onclick="moveFixedItem('${cardId}','${f.id}',1)">▼</button>
         <button class="iconbtn" onclick="openFixedItemModal('${cardId}','${f.id}')">✎</button>
@@ -1003,6 +1003,10 @@ function openFixedItemModal(cardId, itemId){
     <div class="field"><label>항목명</label><input id="f-flabel" value="${item ? item.label : ''}" placeholder="예: 통신비"></div>
     <div class="field"><label>날짜</label><input id="f-fdate" type="date" value="${item && item.date ? item.date : ''}"></div>
     <div class="field"><label>금액 (${monthLabel(viewMonth)}부터 적용)</label><input id="f-famount" type="number" value="${amountVal}"></div>
+    <div class="field" style="display:flex;align-items:center;gap:8px;">
+      <input type="checkbox" id="f-fexcluded" style="width:auto;" ${item && item.excluded ? 'checked' : ''}>
+      <label for="f-fexcluded" style="margin:0;font-size:13px;color:var(--text);">이 항목은 카드 실적에서 제외</label>
+    </div>
     <div class="modal-actions">
       ${item ? `<button class="btn btn-danger" onclick="deleteFixedItem('${cardId}','${itemId}')">삭제</button>` : ''}
       <button class="btn" onclick="openCardEntriesModal('${cardId}')">취소</button>
@@ -1014,16 +1018,17 @@ function saveFixedItem(cardId, itemId){
   const label = document.getElementById('f-flabel').value.trim();
   const date = document.getElementById('f-fdate').value || null;
   const amountRaw = document.getElementById('f-famount').value;
+  const excluded = document.getElementById('f-fexcluded').checked;
   if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
   const card = state.cards.find(c => c.id === cardId);
   if(!card.fixedItems) card.fixedItems = [];
   if(itemId){
     const item = card.fixedItems.find(f => f.id === itemId);
-    item.label = label; item.date = date;
+    item.label = label; item.date = date; item.excluded = excluded;
     if(!state.cardFixedAmounts[viewMonth]) state.cardFixedAmounts[viewMonth] = {};
     state.cardFixedAmounts[viewMonth][itemId] = parseInt(amountRaw, 10) || 0;
   } else {
-    card.fixedItems.push({ id: uid(), label, date, amount: parseInt(amountRaw, 10) || 0 });
+    card.fixedItems.push({ id: uid(), label, date, amount: parseInt(amountRaw, 10) || 0, excluded });
   }
   saveState(); render(); openCardEntriesModal(cardId);
 }
@@ -1895,7 +1900,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v31';
+const APP_VERSION = 'v32';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
