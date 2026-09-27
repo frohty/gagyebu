@@ -922,12 +922,20 @@ function openCardEntriesModal(cardId){
   html += `<p class="desc" style="margin:0 0 10px;">실적 인정 ${formatWon(countedTotal)}${paidTotal !== countedTotal ? ` · 실제 결제 ${formatWon(paidTotal)}` : ''}</p>`;
 
   html += `<p style="font-size:13px;font-weight:500;margin:14px 0 6px;">고정지출실적</p>`;
-  html += (card.fixedItems && card.fixedItems.length) ? card.fixedItems.map((f,i,arr) => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
-      <div><span style="font-size:13px;">${f.label}</span>${f.excluded ? `<span style="font-size:10px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;">실적제외</span>` : ''}${f.date ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${f.date}</p>` : ''}</div>
+  const sortedFixedItems = (card.fixedItems || []).slice().sort((a,b) => {
+    if(!a.date && !b.date) return 0;
+    if(!a.date) return 1;
+    if(!b.date) return -1;
+    return a.date.localeCompare(b.date);
+  });
+  html += sortedFixedItems.length ? sortedFixedItems.map(f => `<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);">
+      <div>
+        <span style="font-size:13px;">${f.label}</span>${f.excluded ? `<span style="font-size:10px;color:var(--muted);border:0.5px solid var(--border);border-radius:4px;padding:1px 5px;margin-left:6px;">실적제외</span>` : ''}
+        ${f.date ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;">${f.date}</p>` : ''}
+        ${f.memo ? `<p style="font-size:11px;color:var(--muted);margin:2px 0 0;white-space:pre-wrap;">${f.memo}</p>` : ''}
+      </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="font-size:13px;${f.excluded ? 'color:var(--muted);' : ''}">${formatWon(getFixedItemAmount(f, viewMonth))}</span>
-        <button class="iconbtn" onclick="moveFixedItem('${cardId}','${f.id}',-1)">▲</button>
-        <button class="iconbtn" onclick="moveFixedItem('${cardId}','${f.id}',1)">▼</button>
         <button class="iconbtn" onclick="openFixedItemModal('${cardId}','${f.id}')">✎</button>
       </div>
     </div>`).join('') : `<p class="desc" style="padding:4px 0">고정지출실적 없음</p>`;
@@ -986,14 +994,6 @@ function saveCardUsage(cardId, entryId){
   }
   saveState(); render(); openCardEntriesModal(cardId);
 }
-function moveFixedItem(cardId, itemId, delta){
-  const card = state.cards.find(c => c.id === cardId);
-  const idx = card.fixedItems.findIndex(f => f.id === itemId);
-  const newIdx = idx + delta;
-  if(newIdx < 0 || newIdx >= card.fixedItems.length) return;
-  [card.fixedItems[idx], card.fixedItems[newIdx]] = [card.fixedItems[newIdx], card.fixedItems[idx]];
-  saveState(); render(); openCardEntriesModal(cardId);
-}
 function openFixedItemModal(cardId, itemId){
   const card = state.cards.find(c => c.id === cardId);
   const item = itemId ? card.fixedItems.find(f => f.id === itemId) : null;
@@ -1007,6 +1007,7 @@ function openFixedItemModal(cardId, itemId){
       <input type="checkbox" id="f-fexcluded" style="width:auto;" ${item && item.excluded ? 'checked' : ''}>
       <label for="f-fexcluded" style="margin:0;font-size:13px;color:var(--text);">이 항목은 카드 실적에서 제외</label>
     </div>
+    <div class="field"><label>메모 (선택)</label><textarea id="f-fmemo" rows="3" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box;">${item && item.memo ? item.memo : ''}</textarea></div>
     <div class="modal-actions">
       ${item ? `<button class="btn btn-danger" onclick="deleteFixedItem('${cardId}','${itemId}')">삭제</button>` : ''}
       <button class="btn" onclick="openCardEntriesModal('${cardId}')">취소</button>
@@ -1019,16 +1020,17 @@ function saveFixedItem(cardId, itemId){
   const date = document.getElementById('f-fdate').value || null;
   const amountRaw = document.getElementById('f-famount').value;
   const excluded = document.getElementById('f-fexcluded').checked;
+  const memo = document.getElementById('f-fmemo').value.trim();
   if(!label || amountRaw === ''){ alert('항목명과 금액을 입력해줘'); return; }
   const card = state.cards.find(c => c.id === cardId);
   if(!card.fixedItems) card.fixedItems = [];
   if(itemId){
     const item = card.fixedItems.find(f => f.id === itemId);
-    item.label = label; item.date = date; item.excluded = excluded;
+    item.label = label; item.date = date; item.excluded = excluded; item.memo = memo;
     if(!state.cardFixedAmounts[viewMonth]) state.cardFixedAmounts[viewMonth] = {};
     state.cardFixedAmounts[viewMonth][itemId] = parseInt(amountRaw, 10) || 0;
   } else {
-    card.fixedItems.push({ id: uid(), label, date, amount: parseInt(amountRaw, 10) || 0, excluded });
+    card.fixedItems.push({ id: uid(), label, date, amount: parseInt(amountRaw, 10) || 0, excluded, memo });
   }
   saveState(); render(); openCardEntriesModal(cardId);
 }
@@ -1900,7 +1902,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v32';
+const APP_VERSION = 'v33';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
