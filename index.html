@@ -158,6 +158,19 @@ function migrateState(s){
   if(!s.cardEntries) s.cardEntries = {};
   if(!s.cardFixedAmounts) s.cardFixedAmounts = {};
   if(!s.cardFixedDates) s.cardFixedDates = {};
+  (s.cards || []).forEach(c => {
+    (c.fixedItems || []).forEach(f => {
+      if(f.memo){
+        Object.keys(s.cardFixedDates).forEach(mk => {
+          const rec = s.cardFixedDates[mk][f.id];
+          if(typeof rec === 'string'){
+            s.cardFixedDates[mk][f.id] = { date: rec, memo: f.memo };
+          }
+        });
+        delete f.memo;
+      }
+    });
+  });
   if(!s.cardTierAmounts) s.cardTierAmounts = {};
   const knownFixedBreakdowns = {
     '롯데카드': [['뮤엠영어',600000],['상승도장',150000]],
@@ -1926,7 +1939,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v35';
+const APP_VERSION = 'v36';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
