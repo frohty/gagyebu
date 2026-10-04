@@ -160,13 +160,29 @@ function migrateState(s){
   if(!s.cardFixedDates) s.cardFixedDates = {};
   (s.cards || []).forEach(c => {
     (c.fixedItems || []).forEach(f => {
-      if(f.memo){
+      const legacyDate = f.date || null;
+      const legacyMemo = f.memo || null;
+      if(legacyDate || legacyMemo){
+        let attached = false;
         Object.keys(s.cardFixedDates).forEach(mk => {
           const rec = s.cardFixedDates[mk][f.id];
           if(typeof rec === 'string'){
-            s.cardFixedDates[mk][f.id] = { date: rec, memo: f.memo };
+            s.cardFixedDates[mk][f.id] = { date: rec, memo: legacyMemo || '' };
+            attached = true;
+          } else if(rec && typeof rec === 'object'){
+            if(legacyDate && !rec.date) rec.date = legacyDate;
+            if(legacyMemo && !rec.memo) rec.memo = legacyMemo;
+            attached = true;
           }
         });
+        if(!attached){
+          const targetMonth = legacyDate ? legacyDate.slice(0,7) : getMonthKey(new Date());
+          if(!s.cardFixedDates[targetMonth]) s.cardFixedDates[targetMonth] = {};
+          if(!s.cardFixedDates[targetMonth][f.id]) s.cardFixedDates[targetMonth][f.id] = { date: legacyDate, memo: legacyMemo || '' };
+        }
+        if(legacyDate) f._legacyDate = legacyDate;
+        if(legacyMemo) f._legacyMemo = legacyMemo;
+        f.date = null;
         delete f.memo;
       }
     });
@@ -192,7 +208,7 @@ function migrateState(s){
         c.fixedItems = c.fixed ? [{ id: uid(), label: '고정', amount: c.fixed, date: null }] : [];
       }
     } else {
-      c.fixedItems.forEach(f => { if(f.date === undefined) f.date = null; });
+      c.fixedItems.forEach(f => { if(f.date !== null && f.date !== undefined) f.date = null; });
     }
     if(!c.tiers){
       c.tiers = (c.target != null) ? [{ id: uid(), amount: c.target, benefit: knownTierBenefits[c.name] || '' }] : [];
@@ -1939,7 +1955,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v36';
+const APP_VERSION = 'v38';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
