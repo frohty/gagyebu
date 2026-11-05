@@ -337,6 +337,12 @@ function countPeriodsWeekly(openDateStr, asOfDate){
 function sumLogUpTo(log, asOfDate){
   return (log || []).filter(p => new Date(p.date + 'T00:00:00') <= asOfDate).reduce((s,p) => s + p.amount, 0);
 }
+function latestLogValueUpTo(log, asOfDate){
+  const entries = (log || []).filter(p => new Date(p.date + 'T00:00:00') <= asOfDate);
+  if(!entries.length) return 0;
+  entries.sort((a,b) => a.date.localeCompare(b.date));
+  return entries[entries.length - 1].amount;
+}
 function getPeriodDates(openDateStr, payDay, asOfDate){
   const open = new Date(openDateStr + 'T00:00:00');
   if(asOfDate < open) return [];
@@ -407,7 +413,9 @@ function fundPrincipalAsOf(item, asOfDate){
   if(item.frequency === '월') return item.contributionAmount * countPeriodsMonthly(item.openDate, item.payDay, asOfDate);
   if(item.frequency === '주') return item.contributionAmount * countPeriodsWeekly(item.openDate, asOfDate);
   if(item.frequency === '없음') return item.initialAmount || 0;
-  return sumLogUpTo(item.paymentLog, asOfDate);
+  // 비정기: 납입 기록은 "추가 납입"이 아니라 그 날짜 기준 누적 총액의 스냅샷이므로,
+  // 전체를 더하지 않고 asOfDate 이전(포함) 가장 최근 기록값을 그대로 현재 누적액으로 사용한다.
+  return latestLogValueUpTo(item.paymentLog, asOfDate);
 }
 function getIncomeLogTotal(monthKey){
   return (state.incomeLog[monthKey] || []).reduce((sum, s) => sum + s.amount, 0);
@@ -1256,9 +1264,9 @@ function deleteAmountChange(itemId, changeId){
     saveState(); render(); closeModal();
   });
 }
-function renderPaymentLogSection(itemId, log){
+function renderPaymentLogSection(itemId, log, isSnapshot){
   let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
-    <span class="desc" style="margin:0">납입 기록</span>
+    <span class="desc" style="margin:0">${isSnapshot ? '누적액 기록' : '납입 기록'}</span>
     <button class="iconbtn" style="border:0.5px solid var(--border);border-radius:6px;padding:4px 8px;" onclick="openPaymentLogModal('${itemId}', null)">+ 기록추가</button>
   </div>`;
   const sorted = (log || []).slice().sort((a,b) => b.date.localeCompare(a.date));
@@ -1348,10 +1356,10 @@ function renderFundRow(d, i, total){
   else if(d.frequency === '주') infoLine = `주 ${formatWon(d.contributionAmount)} · ${d.openDate} 시작`;
   else if(d.frequency === '없음') infoLine = `일시납 ${formatWon(d.initialAmount)} · ${d.openDate} 시작`;
   else infoLine = `비정기 · ${d.openDate} 시작`;
-  html += `<p class="desc">${infoLine} · 누적 납입 ${formatWon(Math.round(principal))}</p>`;
+  html += `<p class="desc">${infoLine} · ${d.frequency === '비정기' ? '현재 누적액' : '누적 납입'} ${formatWon(Math.round(principal))}</p>`;
   if(d.memo) html += `<p class="desc" style="white-space:pre-wrap;">${d.memo}</p>`;
   if(d.frequency === '비정기'){
-    html += renderPaymentLogSection(d.id, d.paymentLog);
+    html += renderPaymentLogSection(d.id, d.paymentLog, true);
   }
   html += `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;">
     <span class="desc" style="margin:0">평가금액 기록</span>
@@ -1530,7 +1538,7 @@ function openSavingsModal(type, id, override){
     } else if(freq === '없음'){
       fields += `<div class="field"><label>납입금액 (최초 1회)</label><input id="f-initial" type="number" value="${item ? item.initialAmount : ''}"></div>`;
     } else {
-      fields += `<p class="desc" style="margin:0 0 10px;">저장하면 "납입 기록"에서 넣을 때마다 날짜·금액을 하나씩 추가해줘</p>`;
+      fields += `<p class="desc" style="margin:0 0 10px;">저장하면 "누적액 기록"에서 체크하는 날마다 그 시점의 누적 총액을 그대로 입력해줘 (추가 납입액이 아니라 전체 금액)</p>`;
     }
   }
   fields += `<div class="field"><label>메모</label><textarea id="f-memo" rows="3" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;resize:vertical;box-sizing:border-box;">${item ? item.memo : ''}</textarea></div>`;
@@ -1607,9 +1615,11 @@ function openPaymentLogModal(itemId, logId){
   const item = state.deposits.find(d => d.id === itemId);
   const entry = logId ? item.paymentLog.find(p => p.id === logId) : null;
   const todayStr = new Date().toISOString().slice(0,10);
+  const isSnapshot = item.type === '펀드연금' && item.frequency === '비정기';
   document.getElementById('modalContent').innerHTML = `
     <div class="field"><label>날짜</label><input id="f-pdate" type="date" value="${entry ? entry.date : todayStr}"></div>
-    <div class="field"><label>금액</label><input id="f-pamount" type="number" value="${entry ? entry.amount : ''}"></div>
+    <div class="field"><label>${isSnapshot ? '그 날짜의 누적 총액' : '금액'}</label><input id="f-pamount" type="number" value="${entry ? entry.amount : ''}"></div>
+    ${isSnapshot ? `<p class="desc" style="margin:4px 0 0;">추가 납입액이 아니라, 그 시점 기준 전체 누적 금액을 입력해줘</p>` : ''}
     <div class="modal-actions">
       ${entry ? `<button class="btn btn-danger" onclick="deletePaymentLog('${itemId}','${logId}')">삭제</button>` : ''}
       <button class="btn" onclick="closeModal()">취소</button>
@@ -1955,7 +1965,7 @@ function confirmImport(){
 }
 
 /* ---------- INIT ---------- */
-const APP_VERSION = 'v38';
+const APP_VERSION = 'v39';
 function updateDateLabel(){
   const d = new Date();
   document.getElementById('screenDate').textContent = (d.getMonth()+1) + '월 ' + d.getDate() + '일 · ' + APP_VERSION;
